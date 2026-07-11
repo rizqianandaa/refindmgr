@@ -1,0 +1,3 @@
+"""refindtm -- CLI ringan untuk mengelola tema rEFInd."""
+
+__version__ = "0.1.0"

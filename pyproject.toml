@@ -1,0 +1,18 @@
+[project]
+name = "refindtm"
+version = "0.1.0"
+description = "CLI ringan untuk memasang, mengganti, dan menghapus tema rEFInd tanpa edit manual refind.conf."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Rizqi Ananda" }]
+
+[project.scripts]
+refindtm = "refindtm.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["refindtm*"]
