@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from refindtm import conf as conf_mod
+from refindmgr import conf as conf_mod
 
 
 SAMPLE_CONF = [

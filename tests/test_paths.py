@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from refindtm.paths import detect_refind_dir, refind_conf_path, themes_dir, ENV_OVERRIDE
+from refindmgr.paths import detect_refind_dir, refind_conf_path, themes_dir, ENV_OVERRIDE
 
 
 class TestDetectRefindDir(unittest.TestCase):

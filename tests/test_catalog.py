@@ -1,6 +1,6 @@
 import unittest
 
-from refindtm import catalog as catalog_mod
+from refindmgr import catalog as catalog_mod
 
 
 class TestCatalog(unittest.TestCase):

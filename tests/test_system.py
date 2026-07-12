@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from refindtm import system as system_mod
+from refindmgr import system as system_mod
 
 
 def _fake_which(available):

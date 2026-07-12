@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 def run_cli(args, cwd):
     return subprocess.run(
-        [sys.executable, "-m", "refindtm.cli", *args],
+        [sys.executable, "-m", "refindmgr.cli", *args],
         cwd=cwd,
         capture_output=True,
         text=True,
@@ -18,7 +18,7 @@ class TestCliSmoke(unittest.TestCase):
     def test_help_runs_successfully(self):
         result = run_cli(["--help"], cwd=str(Path(__file__).resolve().parent.parent))
         self.assertEqual(result.returncode, 0)
-        self.assertIn("refindtm", result.stdout)
+        self.assertIn("refindmgr", result.stdout)
 
     def test_catalog_lists_entries(self):
         result = run_cli(["catalog"], cwd=str(Path(__file__).resolve().parent.parent))
@@ -36,8 +36,8 @@ class TestCliSmoke(unittest.TestCase):
 
     def test_refind_dir_flag_works_after_subcommand_too(self):
         # Regression test: --refind-dir used to only be accepted before the
-        # subcommand name (e.g. 'refindtm --refind-dir X list'). Placing it
-        # after the subcommand ('refindtm list --refind-dir X') used to be
+        # subcommand name (e.g. 'refindmgr --refind-dir X list'). Placing it
+        # after the subcommand ('refindmgr list --refind-dir X') used to be
         # silently rejected by argparse.
         root = str(Path(__file__).resolve().parent.parent)
         result = run_cli(["list", "--refind-dir", "/does/not/exist"], cwd=root)

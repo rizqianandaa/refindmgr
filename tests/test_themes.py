@@ -3,9 +3,9 @@ import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from refindtm import themes as themes_mod
-from refindtm import conf as conf_mod
-from refindtm.paths import refind_conf_path, themes_dir
+from refindmgr import themes as themes_mod
+from refindmgr import conf as conf_mod
+from refindmgr.paths import refind_conf_path, themes_dir
 
 
 def _make_refind_dir(tmp: str) -> Path:

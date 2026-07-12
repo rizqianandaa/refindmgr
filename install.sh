@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Installer refindtm: sekali jalan, tidak perlu venv/pip manual.
-# Setelah ini, 'refindtm' (dan 'sudo refindtm') langsung bisa dipanggil dari mana saja.
+# Installer refindmgr: sekali jalan, tidak perlu venv/pip manual.
+# Setelah ini, 'refindmgr' (dan 'sudo refindmgr') langsung bisa dipanggil dari mana saja.
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "install.sh butuh sudo, supaya command 'refindtm' bisa ditempatkan di /usr/local/bin"
-  echo "dan supaya 'sudo refindtm ...' nanti benar-benar bisa menemukan commandnya."
+  echo "install.sh butuh sudo, supaya command 'refindmgr' bisa ditempatkan di /usr/local/bin"
+  echo "dan supaya 'sudo refindmgr ...' nanti benar-benar bisa menemukan commandnya."
   echo ""
   echo "Jalankan ulang:"
   echo "  sudo ./install.sh"
@@ -13,7 +13,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="/opt/refindtm"
+INSTALL_DIR="/opt/refindmgr"
 VENV_DIR="$INSTALL_DIR/venv"
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -33,20 +33,20 @@ echo "[1/3] Menyiapkan environment Python terisolasi di $VENV_DIR ..."
 mkdir -p "$INSTALL_DIR"
 python3 -m venv "$VENV_DIR"
 
-echo "[2/3] Memasang refindtm ke environment tersebut ..."
+echo "[2/3] Memasang refindmgr ke environment tersebut ..."
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
 "$VENV_DIR/bin/pip" install --quiet "$SCRIPT_DIR"
 
-echo "[3/3] Memasang command 'refindtm' ke /usr/local/bin ..."
-cat > /usr/local/bin/refindtm << WRAPPER
+echo "[3/3] Memasang command 'refindmgr' ke /usr/local/bin ..."
+cat > /usr/local/bin/refindmgr << WRAPPER
 #!/usr/bin/env bash
-exec "$VENV_DIR/bin/refindtm" "\$@"
+exec "$VENV_DIR/bin/refindmgr" "\$@"
 WRAPPER
-chmod +x /usr/local/bin/refindtm
+chmod +x /usr/local/bin/refindmgr
 
 echo ""
-echo "Selesai! refindtm sudah terpasang dan siap dipakai dari mana saja, contoh:"
-echo "  refindtm doctor"
-echo "  sudo refindtm install minimal --activate"
+echo "Selesai! refindmgr sudah terpasang dan siap dipakai dari mana saja, contoh:"
+echo "  refindmgr doctor"
+echo "  sudo refindmgr install minimal --activate"
 echo ""
 echo "(Tidak perlu lagi bikin venv/pip manual, dan tidak perlu 'source venv/bin/activate'.)"
