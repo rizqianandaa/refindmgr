@@ -28,7 +28,7 @@ Butuh `python3` dan modul `venv`-nya (bawaan di kebanyakan distro; di Debian/Ubu
 install dengan `sudo apt-get install -y python3-venv` kalau belum ada).
 
 ```bash
-git clone <repo-ini>
+git clone https://github.com/rizqianandaa/refindmgr.git
 cd refindmgr
 sudo ./install.sh
 ```
@@ -131,23 +131,6 @@ ditulis oleh root. Tambahkan `sudo` untuk perintah yang mengubah sesuatu.
 (`lsblk`/`sudo blkid`), lalu tentukan manual lewat `--refind-dir` atau
 `REFIND_DIR`.
 
-## Struktur proyek
-
-```
-refindmgr/
-├── refindmgr/
-│   ├── paths.py     # Deteksi folder rEFInd
-│   ├── conf.py      # Baca/ubah refind.conf dengan aman + backup
-│   ├── themes.py    # Install/remove/list tema (git, folder, zip) + validasi nama
-│   ├── catalog.py   # Katalog tema pilihan
-│   ├── system.py    # Deteksi & bantu instalasi rEFInd itu sendiri
-│   └── cli.py       # Antarmuka command-line
-├── tests/           # Unit test (64 test)
-├── install.sh       # Pasang refindmgr sekali jalan (butuh sudo)
-├── uninstall.sh     # Lepas refindmgr dari sistem (butuh sudo)
-└── pyproject.toml   # Metadata package & command `refindmgr`
-```
-
 ## Development
 
 ```bash
@@ -155,12 +138,6 @@ python3 -m venv env && source env/bin/activate
 pip install -e .
 python3 -m unittest discover -s tests -v   # 64 test
 ```
-
-## Roadmap
-
-1. ~~CLI (`refindmgr`)~~ — selesai, 64 test lolos.
-2. GUI sederhana di atas logic yang sama (`cli.py` mendapat lapisan GUI, modul lain
-   tidak berubah).
 
 ## Lisensi
 
