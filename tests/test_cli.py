@@ -98,5 +98,36 @@ class TestCliSmoke(unittest.TestCase):
             self.assertIn("telah dihapus", remove_result.stdout)
 
 
+    def test_interactive_menu_exits_cleanly_with_no_input(self):
+        # When stdin is closed (e.g. non-interactive CI), running refindmgr
+        # with no subcommand must open the menu and then exit cleanly instead
+        # of hanging or crashing.
+        root = str(Path(__file__).resolve().parent.parent)
+        result = subprocess.run(
+            [sys.executable, "-m", "refindmgr.cli", "--refind-dir", "/does/not/exist"],
+            cwd=root,
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("refindmgr", result.stdout)
+        self.assertIn("Sampai jumpa", result.stdout)
+
+    def test_interactive_menu_quit_option_exits_cleanly(self):
+        root = str(Path(__file__).resolve().parent.parent)
+        result = subprocess.run(
+            [sys.executable, "-m", "refindmgr.cli", "--refind-dir", "/does/not/exist"],
+            cwd=root,
+            input="0\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Sampai jumpa", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -291,6 +292,236 @@ def cmd_setup(args: argparse.Namespace) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Menu interaktif -- dipanggil otomatis saat 'refindmgr' dijalankan tanpa subcommand.
+# ---------------------------------------------------------------------------
+
+_USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def _style(code: str) -> str:
+    return code if _USE_COLOR else ""
+
+
+_RESET = _style("\033[0m")
+_BOLD = _style("\033[1m")
+_DIM = _style("\033[2m")
+_RED = _style("\033[31m")
+_GREEN = _style("\033[32m")
+_YELLOW = _style("\033[33m")
+_CYAN = _style("\033[36m")
+_MAGENTA = _style("\033[35m")
+
+
+def _prompt(label: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    try:
+        value = input(f"{label}{suffix}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+    return value or default
+
+
+def _confirm(label: str, default: bool = False) -> bool:
+    hint = "Y/n" if default else "y/N"
+    try:
+        value = input(f"{label} ({hint}): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+    if not value:
+        return default
+    return value in ("y", "yes", "ya")
+
+
+def _carry(top_args: argparse.Namespace) -> dict:
+    """Bawa --refind-dir dari args tingkat atas ke Namespace baru yang dibuat menu."""
+    extra: dict = {}
+    if hasattr(top_args, "refind_dir"):
+        extra["refind_dir"] = top_args.refind_dir
+    return extra
+
+
+def _print_status_banner(top_args: argparse.Namespace) -> None:
+    refind_dir = detect_refind_dir(_refind_dir_arg(top_args))
+    rule = f"{_CYAN}{'=' * 56}{_RESET}"
+    print(rule)
+    print(f"  {_BOLD}{_MAGENTA}refindmgr{_RESET}{_DIM} -- rEFInd Theme Manager{_RESET}")
+    print(rule)
+    if refind_dir is None:
+        print(f"  {_RED}x{_RESET} rEFInd belum terdeteksi di lokasi umum.")
+        print(f"    {_DIM}Pakai menu '10) Pasang rEFInd' di bawah, atau set --refind-dir.{_RESET}")
+    else:
+        conf_path = refind_conf_path(refind_dir)
+        active = None
+        if conf_path.is_file():
+            active_list = conf_mod.get_active_themes(conf_mod.read_lines(conf_path))
+            active = active_list[0] if active_list else None
+        installed_count = len(themes_mod.list_installed(refind_dir))
+        theme_info = f"aktif: {active}" if active else "tidak ada tema aktif"
+        print(f"  {_GREEN}v{_RESET} rEFInd terdeteksi: {_DIM}{refind_dir}{_RESET}")
+        print(f"  {_GREEN}v{_RESET} {installed_count} tema terpasang ({theme_info})")
+    if system_mod.is_root():
+        print(f"  {_GREEN}v{_RESET} Berjalan sebagai root")
+    else:
+        print(f"  {_YELLOW}o{_RESET} Bukan root {_DIM}(sudo dibutuhkan untuk aksi yang menulis){_RESET}")
+    print(rule)
+
+
+def _menu_list(top_args: argparse.Namespace) -> None:
+    cmd_list(top_args)
+
+
+def _menu_catalog(top_args: argparse.Namespace) -> None:
+    cmd_catalog(top_args)
+
+
+def _menu_install(top_args: argparse.Namespace) -> None:
+    print("Sumber tema: key katalog (misal 'minimal'), URL git, folder lokal, atau file .zip.")
+    print("Lihat menu '2) Jelajahi katalog tema' dulu kalau belum punya sumber tema.")
+    source = _prompt("Sumber tema")
+    if not source:
+        print("Dibatalkan (sumber tema tidak boleh kosong).")
+        return
+    name = _prompt("Nama folder tujuan (kosongkan untuk otomatis)") or None
+    activate = _confirm("Langsung aktifkan setelah dipasang?", default=True)
+    ns = argparse.Namespace(source=source, name=name, activate=activate, **_carry(top_args))
+    cmd_install(ns)
+
+
+def _menu_activate(top_args: argparse.Namespace) -> None:
+    refind_dir = detect_refind_dir(_refind_dir_arg(top_args))
+    if refind_dir:
+        installed = themes_mod.list_installed(refind_dir)
+        print("Tema terpasang: " + (", ".join(installed) if installed else "(tidak ada)"))
+    name = _prompt("Nama tema yang diaktifkan")
+    if not name:
+        print("Dibatalkan.")
+        return
+    cmd_activate(argparse.Namespace(name=name, **_carry(top_args)))
+
+
+def _menu_deactivate(top_args: argparse.Namespace) -> None:
+    if not _confirm("Nonaktifkan semua tema (kembali ke tampilan default rEFInd)?"):
+        print("Dibatalkan.")
+        return
+    cmd_deactivate(argparse.Namespace(**_carry(top_args)))
+
+
+def _menu_remove(top_args: argparse.Namespace) -> None:
+    refind_dir = detect_refind_dir(_refind_dir_arg(top_args))
+    if refind_dir:
+        installed = themes_mod.list_installed(refind_dir)
+        print("Tema terpasang: " + (", ".join(installed) if installed else "(tidak ada)"))
+    name = _prompt("Nama tema yang dihapus")
+    if not name:
+        print("Dibatalkan.")
+        return
+    if not _confirm(f"Yakin hapus tema '{name}'? Ini tidak bisa dibatalkan"):
+        print("Dibatalkan.")
+        return
+    cmd_remove(argparse.Namespace(name=name, **_carry(top_args)))
+
+
+def _menu_backup(top_args: argparse.Namespace) -> None:
+    cmd_backup(argparse.Namespace(**_carry(top_args)))
+
+
+def _menu_restore(top_args: argparse.Namespace) -> None:
+    refind_dir = detect_refind_dir(_refind_dir_arg(top_args))
+    if refind_dir:
+        backups = conf_mod.list_backups(refind_conf_path(refind_dir))
+        if backups:
+            print("Backup tersedia (terbaru di bawah):")
+            for backup_path in backups:
+                print(f"  - {backup_path}")
+    backup = _prompt("Path backup (kosongkan untuk pakai yang terbaru)") or None
+    cmd_restore(argparse.Namespace(backup=backup, **_carry(top_args)))
+
+
+def _menu_doctor(top_args: argparse.Namespace) -> None:
+    cmd_doctor(top_args)
+
+
+def _menu_setup(top_args: argparse.Namespace) -> None:
+    yes = _confirm("Jalankan instalasi rEFInd sekarang (bukan hanya pratinjau)?")
+    cmd_setup(argparse.Namespace(yes=yes, **_carry(top_args)))
+
+
+_MENU_SECTIONS = [
+    (
+        "Tema",
+        [
+            ("1", "Lihat tema terpasang & aktif", _menu_list),
+            ("2", "Jelajahi katalog tema", _menu_catalog),
+            ("3", "Pasang tema baru", _menu_install),
+            ("4", "Aktifkan tema", _menu_activate),
+            ("5", "Nonaktifkan semua tema", _menu_deactivate),
+            ("6", "Hapus tema", _menu_remove),
+        ],
+    ),
+    (
+        "Backup refind.conf",
+        [
+            ("7", "Buat backup sekarang", _menu_backup),
+            ("8", "Restore dari backup", _menu_restore),
+        ],
+    ),
+    (
+        "Sistem",
+        [
+            ("9", "Diagnostik (doctor)", _menu_doctor),
+            ("10", "Pasang rEFInd itu sendiri (setup)", _menu_setup),
+        ],
+    ),
+]
+
+_MENU_HANDLERS = {key: handler for _, items in _MENU_SECTIONS for key, _, handler in items}
+
+
+def run_interactive_menu(top_args: argparse.Namespace) -> None:
+    """Menu CLI interaktif -- dipanggil otomatis saat 'refindmgr' dijalankan tanpa subcommand."""
+    while True:
+        print()
+        _print_status_banner(top_args)
+        print()
+        for section, items in _MENU_SECTIONS:
+            print(f"{_BOLD}{section}{_RESET}")
+            for key, label, _handler in items:
+                print(f"  {_CYAN}{key}){_RESET} {label}")
+            print()
+        print(f"  {_CYAN}0){_RESET} Keluar\n")
+        try:
+            choice = input(f"{_BOLD}Pilih menu >{_RESET} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print("Sampai jumpa!")
+            return
+        print()
+        if choice == "":
+            continue
+        if choice in ("0", "q", "quit", "exit"):
+            print("Sampai jumpa!")
+            return
+        handler = _MENU_HANDLERS.get(choice)
+        if handler is None:
+            print(f"{_RED}Pilihan tidak dikenal: '{choice}'{_RESET}")
+            continue
+        try:
+            handler(top_args)
+        except SystemExit:
+            # cmd_* memanggil sys.exit() untuk kegagalan validasi -- tangkap di sini
+            # supaya menu tetap berjalan, bukan menutup seluruh program.
+            pass
+        print()
+        try:
+            input(f"{_DIM}Tekan Enter untuk kembali ke menu...{_RESET}")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Parser bersama untuk --refind-dir, supaya flag ini bisa dipakai baik
     # sebelum maupun setelah nama subcommand, misal:
@@ -306,9 +537,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="refindmgr",
         description="rEFInd Theme Manager -- kelola tema rEFInd tanpa perlu edit manual refind.conf.",
+        epilog="Jalankan 'refindmgr' tanpa argumen untuk membuka menu interaktif.",
         parents=[common],
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=False)
 
     p_list = sub.add_parser("list", help="Tampilkan tema yang terpasang dan yang aktif.", parents=[common])
     p_list.set_defaults(func=cmd_list)
@@ -378,7 +610,10 @@ def main(argv=None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        args.func(args)
+        if getattr(args, "command", None) is None:
+            run_interactive_menu(args)
+        else:
+            args.func(args)
     except PermissionError as exc:
         print(
             f"Akses ditolak: {exc}\n"

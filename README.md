@@ -1,144 +1,226 @@
 # refindmgr
 
-**refindmgr** adalah CLI open source untuk mengelola tema tampilan boot menu
-[rEFInd](https://www.rodsbooks.com/refind/) — pasang, ganti, dan hapus tema tanpa
-perlu masuk ke partisi EFI dan mengedit `refind.conf` secara manual.
+**refindmgr** is an open-source CLI for managing [rEFInd](https://www.rodsbooks.com/refind/)
+boot menu themes — install, switch, and remove themes without ever touching the EFI
+partition or hand-editing `refind.conf`.
 
-Versi ini adalah CLI. Rencana selanjutnya: GUI sederhana di atas logic yang sama.
+It now also ships with a friendly **interactive menu** — just run `refindmgr` with no
+arguments and pick what you want from a list, no flags to memorize.
 
-## Fitur
+## Features
 
-- **Katalog tema siap pakai** — pasang tema populer hanya dengan satu nama key.
-- **Pasang tema dari mana pun** — URL git, folder lokal, atau file `.zip`.
-- **Ganti tema aktif** dalam satu perintah, tanpa edit manual `refind.conf`.
-- **Backup otomatis** setiap kali `refind.conf` diubah, dengan perintah `restore`
-  untuk mengembalikannya kapan saja.
-- **Validasi nama tema** yang mencegah path traversal (`../../etc` dan sejenisnya
-  akan selalu ditolak).
-- **`refindmgr setup`** — bantu memasang rEFInd itu sendiri (lewat package manager
-  sistem + skrip resmi `refind-install`) kalau belum terpasang sama sekali.
-- **`refindmgr doctor`** — diagnostik satu perintah untuk memastikan semuanya
-  terdeteksi dengan benar sebelum melakukan perubahan apa pun.
-- Tidak pernah menyentuh boot loader/NVRAM secara langsung — hanya mengelola folder
-  `themes/` dan baris `include` di `refind.conf`.
+- **Interactive menu** — run `refindmgr` with no arguments to get a numbered menu with
+  a live status banner (rEFInd detected? which theme is active? running as root?).
+- **Curated theme catalog** — install popular themes with a single short key.
+- **Install themes from anywhere** — git URL, local folder, or a local `.zip` file.
+- **Switch the active theme** in one command, no manual `refind.conf` editing.
+- **Automatic backups** every time `refind.conf` is changed, plus a `restore` command
+  to roll back at any time.
+- **Theme name validation** that blocks path traversal (`../../etc` and similar are
+  always rejected).
+- **`refindmgr setup`** — installs rEFInd itself (via the system package manager plus
+  the official `refind-install` script) if it isn't present yet. `./install.sh` now
+  runs this automatically, so a fresh clone gets both refindmgr *and* rEFInd ready to
+  go in one step.
+- **`refindmgr doctor`** — a one-shot diagnostic to confirm everything is detected
+  correctly before you change anything.
+- Never touches the boot loader/NVRAM directly — it only manages the `themes/` folder
+  and the `include` lines inside `refind.conf`.
 
-## Instalasi
+## Installation
 
-Butuh `python3` dan modul `venv`-nya (bawaan di kebanyakan distro; di Debian/Ubuntu
-install dengan `sudo apt-get install -y python3-venv` kalau belum ada).
+Requires `python3` and its `venv` module (bundled with most distros; on Debian/Ubuntu
+install it with `sudo apt-get install -y python3-venv` if it's missing).
 
 ```bash
-git clone https://github.com/rizqianandaa/refindmgr.git
+git clone <this-repo>
 cd refindmgr
 sudo ./install.sh
 ```
 
-`install.sh` membuat environment Python terisolasi di `/opt/refindmgr` (tidak
-menyentuh Python/pip sistem) dan memasang command `refindmgr` ke `/usr/local/bin`,
-supaya langsung bisa dipanggil dari mana saja — termasuk lewat `sudo` — tanpa perlu
-`venv`/`pip install` manual.
+`install.sh` does four things automatically:
 
-Untuk melepasnya:
+1. Creates an isolated Python environment in `/opt/refindmgr` (never touches your
+   system Python/pip).
+2. Installs refindmgr into that environment.
+3. Installs the `refindmgr` command into `/usr/local/bin`, so it can be called from
+   anywhere — including through `sudo` — with no manual `venv`/`pip install` step.
+4. **Installs rEFInd itself** if it isn't already on the system (detects your package
+   manager, installs the `refind` package, then runs the official `refind-install`
+   script). If rEFInd is already installed, this step is a safe no-op. If your distro
+   isn't supported yet, install.sh still finishes successfully and just prints
+   instructions for installing rEFInd manually afterwards.
+
+To uninstall:
 
 ```bash
 sudo ./uninstall.sh
 ```
 
-(Tema yang sudah terpasang di partisi EFI tidak ikut terhapus oleh ini — hapus dulu
-dengan `refindmgr remove <nama>` kalau memang mau bersih total.)
+(Themes already installed on the EFI partition are left untouched — run
+`refindmgr remove <name>` first if you want a fully clean removal.)
 
-## Pakai cepat
+## Quick start
+
+The easiest way to use refindmgr is the interactive menu:
 
 ```bash
-refindmgr doctor                          # pastikan rEFInd terdeteksi
-refindmgr catalog                         # lihat pilihan tema
-sudo refindmgr install minimal --activate # pasang + aktifkan
+refindmgr
 ```
 
-Reboot untuk melihat tema barunya di boot menu.
+That opens a menu like this:
 
-> Perintah yang hanya membaca (`list`, `catalog`, `doctor`) tidak butuh `sudo`.
-> Perintah yang menulis ke partisi EFI (`install`, `activate`, `deactivate`,
-> `remove`, `backup`, `restore`, `setup --yes`) butuh `sudo`.
+```
+========================================================
+  refindmgr -- rEFInd Theme Manager
+========================================================
+  [ok] rEFInd detected: /boot/efi/EFI/refind
+  [ok] 2 themes installed (active: rEFInd-minimal)
+  [ok] Running as root
+========================================================
 
-## Semua perintah
+Themes
+  1) Show installed & active themes
+  2) Browse the theme catalog
+  3) Install a new theme
+  4) Activate a theme
+  5) Deactivate all themes
+  6) Remove a theme
 
-| Perintah | Butuh sudo? | Fungsi |
+refind.conf backups
+  7) Create a backup now
+  8) Restore from a backup
+
+System
+  9) Diagnostics (doctor)
+  10) Install rEFInd itself (setup)
+
+  0) Quit
+```
+
+Just type a number and follow the prompts — refindmgr asks for whatever it needs
+(theme source, theme name, confirmations) and shows the same messages as the direct
+commands below.
+
+Prefer scripting or one-off commands instead? All subcommands still work directly:
+
+```bash
+refindmgr doctor                          # confirm rEFInd is detected
+refindmgr catalog                         # browse theme choices
+sudo refindmgr install minimal --activate # install + activate
+```
+
+Reboot to see the new theme in the boot menu.
+
+> Read-only commands (`list`, `catalog`, `doctor`) don't need `sudo`.
+> Commands that write to the EFI partition (`install`, `activate`, `deactivate`,
+> `remove`, `backup`, `restore`, `setup --yes`) need `sudo`.
+
+## All commands
+
+| Command | Needs sudo? | What it does |
 |---|---|---|
-| `refindmgr doctor` | tidak | Diagnostik: folder rEFInd, git, akses root |
-| `refindmgr setup [--yes]` | ya (dengan `--yes`) | Pasang rEFInd itu sendiri jika belum terpasang |
-| `refindmgr catalog` | tidak | Lihat katalog tema pilihan |
-| `refindmgr list` | tidak | Lihat tema terpasang & yang aktif |
-| `refindmgr install <sumber> [--activate] [--name NAMA]` | ya | Pasang tema (katalog/URL git/folder/`.zip`) |
-| `refindmgr activate <nama>` | ya | Jadikan tema `<nama>` aktif |
-| `refindmgr deactivate` | ya | Nonaktifkan semua tema (kembali ke default) |
-| `refindmgr remove <nama>` | ya | Hapus tema terpasang |
-| `refindmgr backup` | ya | Simpan salinan `refind.conf` saat ini |
-| `refindmgr restore [--backup PATH]` | ya | Kembalikan `refind.conf` dari backup |
+| `refindmgr` (no args) | no | Opens the interactive menu |
+| `refindmgr doctor` | no | Diagnostics: rEFInd folder, git, root access |
+| `refindmgr setup [--yes]` | yes (with `--yes`) | Installs rEFInd itself if missing |
+| `refindmgr catalog` | no | Browse the curated theme catalog |
+| `refindmgr list` | no | Show installed & active themes |
+| `refindmgr install <source> [--activate] [--name NAME]` | yes | Install a theme (catalog/git URL/folder/`.zip`) |
+| `refindmgr activate <name>` | yes | Make `<name>` the active theme |
+| `refindmgr deactivate` | yes | Deactivate all themes (back to default look) |
+| `refindmgr remove <name>` | yes | Remove an installed theme |
+| `refindmgr backup` | yes | Save a copy of the current `refind.conf` |
+| `refindmgr restore [--backup PATH]` | yes | Restore `refind.conf` from a backup |
 
-Setiap perintah menerima `--refind-dir /path/ke/EFI/refind` (sebelum atau setelah
-nama perintah) untuk menentukan lokasi folder rEFInd secara manual, atau set sekali
-lewat environment variable:
+Every command accepts `--refind-dir /path/to/EFI/refind` (before or after the
+command name) to set the rEFInd folder location manually, or set it once via an
+environment variable:
 
 ```bash
 export REFIND_DIR=/boot/efi/EFI/refind
 ```
 
-### Sumber tema yang didukung
+### Supported theme sources
 
 ```bash
-sudo refindmgr install minimal                          # key dari katalog
-sudo refindmgr install https://github.com/user/repo     # URL git
-sudo refindmgr install ./tema-yang-sudah-didownload      # folder lokal
-sudo refindmgr install ./tema.zip                        # file .zip lokal
+sudo refindmgr install minimal                          # catalog key
+sudo refindmgr install https://github.com/user/repo     # git URL
+sudo refindmgr install ./already-downloaded-theme        # local folder
+sudo refindmgr install ./theme.zip                        # local .zip file
 ```
 
-Cari lebih banyak pilihan tema (140+) di [refind-themes-collection](https://refind-themes-collection.netlify.app/).
+Find many more theme options (140+) at
+[refind-themes-collection](https://refind-themes-collection.netlify.app/).
 
-## Belum punya rEFInd?
+## Don't have rEFInd yet?
 
-`refindmgr setup` bisa membantu memasang rEFInd itu sendiri:
+`sudo ./install.sh` now installs rEFInd for you automatically as its last step, so in
+most cases you don't need to think about this at all. If you skipped that, or want to
+(re)run it manually, `refindmgr setup` can do it on its own:
 
 ```bash
-refindmgr setup            # pratinjau: tampilkan apa yang akan dilakukan
-sudo refindmgr setup --yes # jalankan instalasi rEFInd sesungguhnya
+refindmgr setup            # preview: show what would happen, no changes made
+sudo refindmgr setup --yes # actually run the rEFInd installation
 ```
 
-Di balik layar: mendeteksi package manager sistem (apt/dnf/pacman/zypper), memasang
-paket `refind` lewat itu, lalu menjalankan skrip **resmi** `refind-install` dari
-proyek rEFInd sendiri. refindmgr tidak pernah menulis ke partisi EFI/NVRAM dengan
-logikanya sendiri untuk langkah ini. Distro lain: ikuti [panduan resmi rEFInd](https://www.rodsbooks.com/refind/installing.html).
+Behind the scenes: it detects your system's package manager (apt/dnf/pacman/zypper),
+installs the `refind` package through it, then runs the **official** `refind-install`
+script from the rEFInd project itself. refindmgr never writes to the EFI
+partition/NVRAM with its own logic for this step. Other distros: follow the
+[official rEFInd install guide](https://www.rodsbooks.com/refind/installing.html).
 
-## Keamanan & backup
+## Security & backups
 
-- Tidak pernah menyentuh `refind_x64.efi`/`refind_ia32.efi`/`refind_aa64.efi` atau
-  berkas boot loader/NVRAM lain — satu-satunya operasi di level itu (`setup --yes`)
-  didelegasikan penuh ke `refind-install` resmi.
-- Setiap perubahan `refind.conf` membuat backup timestamped otomatis lebih dulu
-  (`refind.conf.<waktu>.bak`) sebelum menulis apa pun.
-- Nama tema divalidasi sebagai nama folder aman (menolak path traversal).
+- Never touches `refind_x64.efi`/`refind_ia32.efi`/`refind_aa64.efi` or any other boot
+  loader/NVRAM files directly — the only operation at that level (`setup --yes`) is
+  fully delegated to the official `refind-install` script.
+- Every `refind.conf` change automatically creates a timestamped backup
+  (`refind.conf.<timestamp>.bak`) before writing anything.
+- Theme names are validated as safe folder names (path traversal is always rejected).
 
 ## Troubleshooting
 
-**`sudo refindmgr ...` → `command not found`.** Biasanya karena refindmgr dipasang
-manual di virtual environment (bukan lewat `install.sh`), yang PATH-nya tidak
-terbawa ke shell baru milik `sudo`. Solusi: `sudo ./install.sh`.
+**`sudo refindmgr ...` → `command not found`.** This usually happens if refindmgr was
+installed manually into a virtualenv (instead of via `install.sh`), whose `PATH` isn't
+carried over to the fresh shell that `sudo` spawns. Fix: `sudo ./install.sh`.
 
-**`Permission denied` tanpa `sudo`.** Ini disengaja — partisi EFI hanya bisa
-ditulis oleh root. Tambahkan `sudo` untuk perintah yang mengubah sesuatu.
+**`Permission denied` without `sudo`.** This is intentional — the EFI partition can
+only be written by root. Add `sudo` for commands that change something.
 
-**Folder rEFInd tidak terdeteksi otomatis.** Cek lokasi partisi EFI kamu
-(`lsblk`/`sudo blkid`), lalu tentukan manual lewat `--refind-dir` atau
-`REFIND_DIR`.
+**rEFInd folder not detected automatically.** Check your EFI partition's location
+(`lsblk`/`sudo blkid`), then set it manually with `--refind-dir` or `REFIND_DIR`.
+
+## Project structure
+
+```
+refindmgr/
+├── refindmgr/
+│   ├── paths.py     # Detects the rEFInd folder
+│   ├── conf.py      # Safely reads/edits refind.conf + backups
+│   ├── themes.py    # Install/remove/list themes (git, folder, zip) + name validation
+│   ├── catalog.py   # Curated theme catalog
+│   ├── system.py    # Detects & helps install rEFInd itself
+│   └── cli.py       # Command-line interface + interactive menu
+├── tests/           # Unit tests (66 tests)
+├── install.sh       # One-shot install of refindmgr + rEFInd (needs sudo)
+├── uninstall.sh     # Removes refindmgr from the system (needs sudo)
+└── pyproject.toml   # Package metadata & the `refindmgr` command
+```
 
 ## Development
 
 ```bash
 python3 -m venv env && source env/bin/activate
 pip install -e .
-python3 -m unittest discover -s tests -v   # 64 test
+python3 -m unittest discover -s tests -v   # 66 tests
 ```
 
-## Lisensi
+## Roadmap
 
-MIT License — lihat berkas [`LICENSE`](LICENSE).
+1. ~~CLI (`refindmgr`)~~ — done, including the interactive menu, 66 tests passing.
+2. Simple GUI on top of the same underlying logic (`cli.py` gets a GUI layer; the
+   other modules stay unchanged).
+
+## License
+
+MIT License — see [`LICENSE`](LICENSE).

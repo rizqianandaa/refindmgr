@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Installer refindmgr: sekali jalan, tidak perlu venv/pip manual.
-# Setelah ini, 'refindmgr' (dan 'sudo refindmgr') langsung bisa dipanggil dari mana saja.
+# Setelah ini, 'refindmgr' (dan 'sudo refindmgr') langsung bisa dipanggil dari mana saja,
+# dan skrip ini juga otomatis memasang rEFInd itu sendiri kalau belum ada di sistem ini
+# (bukan cuma mengecek, tapi benar-benar memasangnya lewat 'refindmgr setup --yes').
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "install.sh butuh sudo, supaya command 'refindmgr' bisa ditempatkan di /usr/local/bin"
-  echo "dan supaya 'sudo refindmgr ...' nanti benar-benar bisa menemukan commandnya."
+  echo "dan supaya rEFInd itu sendiri bisa dipasang ke partisi EFI kalau belum ada."
   echo ""
   echo "Jalankan ulang:"
   echo "  sudo ./install.sh"
@@ -29,23 +31,36 @@ if ! python3 -m venv --help >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[1/3] Menyiapkan environment Python terisolasi di $VENV_DIR ..."
+echo "[1/4] Menyiapkan environment Python terisolasi di $VENV_DIR ..."
 mkdir -p "$INSTALL_DIR"
 python3 -m venv "$VENV_DIR"
 
-echo "[2/3] Memasang refindmgr ke environment tersebut ..."
+echo "[2/4] Memasang refindmgr ke environment tersebut ..."
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
 "$VENV_DIR/bin/pip" install --quiet "$SCRIPT_DIR"
 
-echo "[3/3] Memasang command 'refindmgr' ke /usr/local/bin ..."
+echo "[3/4] Memasang command 'refindmgr' ke /usr/local/bin ..."
 cat > /usr/local/bin/refindmgr << WRAPPER
 #!/usr/bin/env bash
 exec "$VENV_DIR/bin/refindmgr" "\$@"
 WRAPPER
 chmod +x /usr/local/bin/refindmgr
 
-echo ""
+echo "[4/4] Memastikan rEFInd itu sendiri sudah terpasang di sistem ini ..."
+if "$VENV_DIR/bin/refindmgr" setup --yes; then
+  echo ""
+else
+  echo ""
+  echo "PERINGATAN: refindmgr tidak bisa memasang rEFInd secara otomatis di sistem ini"
+  echo "(distro/package manager belum didukung, atau langkah instalasinya gagal)."
+  echo "refindmgr sendiri tetap sudah terpasang dengan baik -- kamu masih bisa mencoba"
+  echo "memasang rEFInd manual nanti dengan: sudo refindmgr setup --yes"
+  echo "atau ikuti panduan resmi: https://www.rodsbooks.com/refind/installing.html"
+  echo ""
+fi
+
 echo "Selesai! refindmgr sudah terpasang dan siap dipakai dari mana saja, contoh:"
+echo "  refindmgr                                 # buka menu interaktif"
 echo "  refindmgr doctor"
 echo "  sudo refindmgr install minimal --activate"
 echo ""
