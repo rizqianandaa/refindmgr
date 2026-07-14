@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 from refindmgr import system as system_mod
@@ -185,6 +187,135 @@ class TestPinRefindVersion(unittest.TestCase):
         manager = system_mod.PackageManagerInfo("apt", ["apt-get", "install", "-y", "refind"])
         with self.assertRaises(system_mod.BootstrapError):
             system_mod.pin_refind_version(manager, target="0.14.1", run_fn=fake_run)
+
+
+class TestDownloadRefindDeb(unittest.TestCase):
+    # Bug nyata yang dialami pengguna: repo apt Ubuntu-nya cuma punya 0.14.2,
+    # jadi pin_refind_version() gagal terus -- refindmgr butuh jalur cadangan
+    # yang mengunduh .deb resmi rEFInd langsung dari SourceForge.
+
+    def test_success_returns_dest_path(self):
+        def fake_run(cmd, capture_output, text):
+            self.assertEqual(cmd[0], "curl")
+            self.assertIn("0.14.1", cmd[-1])
+            with open(cmd[cmd.index("-o") + 1], "w") as f:
+                f.write("fake deb bytes")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "refind.deb")
+            result = system_mod.download_refind_deb("0.14.1", dest, run_fn=fake_run)
+            self.assertEqual(result, dest)
+            self.assertTrue(os.path.exists(dest))
+
+    def test_raises_when_curl_fails(self):
+        def fake_run(cmd, capture_output, text):
+            return SimpleNamespace(returncode=1, stdout="", stderr="curl: (6) could not resolve host")
+
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "refind.deb")
+            with self.assertRaises(system_mod.BootstrapError):
+                system_mod.download_refind_deb("0.14.1", dest, run_fn=fake_run)
+
+    def test_raises_when_downloaded_file_is_empty(self):
+        def fake_run(cmd, capture_output, text):
+            # curl "succeeds" (returncode 0) but never actually writes the file
+            # (e.g. SourceForge redirect edge case) -- must still be treated as failure.
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "refind.deb")
+            with self.assertRaises(system_mod.BootstrapError):
+                system_mod.download_refind_deb("0.14.1", dest, run_fn=fake_run)
+
+
+class TestInstallDebFile(unittest.TestCase):
+    def test_success_on_first_dpkg_call(self):
+        calls = []
+
+        def fake_run(cmd, capture_output, text):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+        result = system_mod.install_deb_file("/tmp/refind.deb", run_fn=fake_run)
+        self.assertEqual(result, "ok")
+        self.assertEqual(calls, [["dpkg", "-i", "/tmp/refind.deb"]])
+
+    def test_retries_after_fixing_dependencies(self):
+        calls = []
+
+        def fake_run(cmd, capture_output, text):
+            calls.append(cmd)
+            if cmd[:2] == ["dpkg", "-i"] and calls.count(cmd) == 1:
+                return SimpleNamespace(returncode=1, stdout="", stderr="dependency problems")
+            return SimpleNamespace(returncode=0, stdout="fixed", stderr="")
+
+        result = system_mod.install_deb_file("/tmp/refind.deb", run_fn=fake_run)
+        self.assertEqual(result, "fixed")
+        self.assertIn(["apt-get", "install", "-f", "-y"], calls)
+
+    def test_raises_when_retry_also_fails(self):
+        def fake_run(cmd, capture_output, text):
+            return SimpleNamespace(returncode=1, stdout="", stderr="still broken")
+
+        with self.assertRaises(system_mod.BootstrapError):
+            system_mod.install_deb_file("/tmp/refind.deb", run_fn=fake_run)
+
+
+class TestFindBootKernelFiles(unittest.TestCase):
+    def test_finds_vmlinuz_and_refind_linux_conf(self) -> None:
+        with TemporaryDirectory() as tmp:
+            boot = Path(tmp)
+            (boot / "vmlinuz-5.15.0-91-generic").write_text("x")
+            (boot / "refind_linux.conf").write_text("x")
+            (boot / "initrd.img-5.15.0-91-generic").write_text("x")
+            found = system_mod.find_boot_kernel_files(str(boot))
+            self.assertIn("vmlinuz-5.15.0-91-generic", found)
+            self.assertIn("refind_linux.conf", found)
+            self.assertNotIn("initrd.img-5.15.0-91-generic", found)
+
+    def test_returns_empty_when_boot_dir_missing(self) -> None:
+        found = system_mod.find_boot_kernel_files("/no/such/boot/dir")
+        self.assertEqual(found, [])
+
+
+class TestListEspLoaderFiles(unittest.TestCase):
+    def test_finds_uncovered_loader_outside_refind_and_tools_dirs(self):
+        with TemporaryDirectory() as tmp:
+            esp = Path(tmp)
+            refind_dir = esp / "EFI" / "refind"
+            refind_dir.mkdir(parents=True)
+            (refind_dir / "refind_x64.efi").write_text("x")
+            tools_dir = esp / "EFI" / "tools"
+            tools_dir.mkdir(parents=True)
+            (tools_dir / "shellx64.efi").write_text("x")
+            ubuntu_dir = esp / "EFI" / "ubuntu"
+            ubuntu_dir.mkdir(parents=True)
+            (ubuntu_dir / "shimx64.efi").write_text("x")
+            (ubuntu_dir / "grubx64.efi").write_text("x")
+            boot_dir = esp / "EFI" / "BOOT"
+            boot_dir.mkdir(parents=True)
+            (boot_dir / "bootx64.efi").write_text("x")
+
+            found = system_mod.list_esp_loader_files(refind_dir)
+
+            # rEFInd's own binary and everything under EFI/tools must never
+            # be reported -- rEFInd itself never scans those.
+            self.assertNotIn("EFI/refind/refind_x64.efi", found)
+            self.assertNotIn("EFI/tools/shellx64.efi", found)
+            # Real OS loaders and the duplicate-prone ones must be found.
+            self.assertIn("EFI/ubuntu/shimx64.efi", found)
+            self.assertIn("EFI/ubuntu/grubx64.efi", found)
+            self.assertIn("EFI/BOOT/bootx64.efi", found)
+
+    def test_returns_empty_when_refind_dir_not_under_efi_folder(self):
+        with TemporaryDirectory() as tmp:
+            refind_dir = Path(tmp) / "somewhere" / "refind"
+            refind_dir.mkdir(parents=True)
+            self.assertEqual(system_mod.list_esp_loader_files(refind_dir), [])
 
 
 if __name__ == "__main__":

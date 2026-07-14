@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -11,6 +12,7 @@ from . import catalog as catalog_mod
 from . import conf as conf_mod
 from . import system as system_mod
 from . import themes as themes_mod
+from . import __version__
 from .paths import detect_refind_dir, refind_conf_path
 
 
@@ -185,6 +187,105 @@ def cmd_remove(args: argparse.Namespace) -> None:
 MINIMAL_SHOWTOOLS = "shutdown,reboot"
 MINIMAL_SCANFOR = "internal,external,optical,manual"
 
+# Sumber "entri aneh" kedua yang sangat sering dikeluhkan (terpisah dari baris
+# tools di atas): rEFInd secara default membuat entri boot TERSENDIRI untuk
+# setiap kernel Linux mentah yang ditemukan di /boot (ikon penguin), DAN untuk
+# file loader mentah seperti grubx64.efi/fbx64.efi yang sebenarnya cuma
+# dipanggil secara internal oleh shim (ikon generik/ketupat) -- di samping
+# entri OS yang sudah benar (misalnya "ubuntu", lewat shimx64.efi). Hasilnya:
+# satu OS yang sama bisa muncul sampai 3x di baris atas dengan ikon berbeda-
+# beda, dan ini akan selalu terjadi lagi di laptop siapa pun yang memakai
+# shim+GRUB (Ubuntu, Debian, Fedora, dll.), bukan cuma kasus spesifik.
+# - scan_all_linux_kernels false: hentikan pembuatan entri terpisah per kernel
+#   mentah (ikon penguin generik).
+# - dont_scan_files: sembunyikan file loader mentah yang cuma dipakai secara
+#   internal oleh shim, di semua volume/lokasi manapun ditemukan (ikon
+#   generik/ketupat/kubus).
+MINIMAL_SCAN_ALL_LINUX_KERNELS = "false"
+# PENTING: dimulai dengan '+' supaya ini MENAMBAH ke daftar bawaan rEFInd
+# sendiri (yang sudah cukup panjang -- termasuk nama-nama file shim/MokManager
+# tertentu, lihat refind.log dengan log_level 3+), bukan MENIMPA/mengganti
+# daftar bawaan itu. Tanpa '+' di depan, nilai ini justru bisa membuka
+# kembali file yang sebelumnya disembunyikan rEFInd sendiri secara default.
+# Selain grub*/fb*/mm* (loader internal shim+GRUB), turut disembunyikan
+# bootx64.efi dkk. di folder EFI/BOOT -- loader fallback wajib-UEFI yang oleh
+# banyak distro (termasuk Ubuntu) sengaja dibuat identik/duplikat dengan
+# loader OS yang sudah punya entri sendiri, dan karena folder 'BOOT' tidak
+# cocok dengan nama ikon OS manapun, entri ini tampil dengan ikon generik
+# (kubus/ketupat) -- kandidat paling umum untuk "entri OS ke-3" yang dilihat
+# pengguna di layar boot.
+MINIMAL_DONT_SCAN_FILES = (
+    "+ "
+    "grubx64.efi,grubia32.efi,grubaa64.efi,grubarm.efi,"
+    "fbx64.efi,fbia32.efi,fbaa64.efi,"
+    "mmx64.efi,mmia32.efi,mmaa64.efi,"
+    "EFI/BOOT/bootx64.efi,EFI/BOOT/bootia32.efi,EFI/BOOT/bootaa64.efi"
+)
+
+
+def _declutter_theme_override_note(refind_dir: Path, lines: list, undo: bool) -> str:
+    """Netralkan baris 'showtools'/'scanfor' milik tema aktif (jika ada) di
+    theme.conf-nya sendiri, dan kembalikan catatan penjelasan untuk dicetak.
+
+    Root cause nyata dari "declutter sudah jalan tapi ikon tools masih penuh":
+    rEFInd memproses arahan 'include themes/<nama>/theme.conf' secara inline --
+    jadi kalau tema aktif punya baris 'showtools' sendiri (sangat umum untuk
+    tema dekoratif yang mau memamerkan ikon custom mereka untuk shell/memtest/
+    dll.), baris itu bisa menimpa baris 'showtools' yang refindmgr tulis di
+    refind.conf utama, terlepas dari urutan baris di file dan terlepas dari
+    versi rEFInd yang dipakai. refindmgr sebelumnya hanya mengedit refind.conf
+    utama dan tidak memeriksa hal ini -- inilah yang diperbaiki di sini.
+    """
+    active_theme = conf_mod.get_active_theme(lines)
+    if active_theme is None:
+        return ""
+    theme_conf = themes_mod.theme_conf_path(refind_dir, active_theme)
+    if theme_conf is None:
+        return ""
+
+    if undo:
+        # Tidak mengecek isi baris theme.conf saat ini di sini: kalau declutter
+        # sebelumnya sudah mengomentari baris 'showtools'/'scanfor' milik tema,
+        # baris itu memang TIDAK lagi aktif -- jadi satu-satunya sinyal yang
+        # benar untuk 'apakah kita pernah mengubah file ini' adalah adanya
+        # backup otomatis yang kita buat sendiri saat itu, bukan status aktif
+        # baris saat ini.
+        backups = conf_mod.list_backups(theme_conf)
+        if not backups:
+            return ""
+        conf_mod.restore(theme_conf, backups[-1])
+        return (
+            f"\nCatatan: baris showtools/scanfor milik tema aktif '{active_theme}' "
+            "(di theme.conf-nya sendiri) juga dikembalikan ke isi aslinya."
+        )
+
+    theme_lines = conf_mod.read_lines(theme_conf)
+    # Diperluas dari cek showtools/scanfor semula ke keempat token yang ditulis
+    # oleh declutter, supaya kalau ada tema yang (jarang, tapi mungkin) juga
+    # menyetel scan_all_linux_kernels/dont_scan_files sendiri, itu ikut
+    # dinetralkan dengan cara yang sama -- bukan cuma showtools/scanfor.
+    overriding = [
+        token
+        for token in ("showtools",)
+        if conf_mod.get_global_option(theme_lines, token) is not None
+    ]
+    if not overriding:
+        return ""
+
+    conf_mod.backup(theme_conf)
+    new_theme_lines = theme_lines
+    for token in overriding:
+        new_theme_lines = conf_mod.unset_global_option(new_theme_lines, token)
+    conf_mod.write_lines(theme_conf, new_theme_lines)
+    return (
+        f"\nCatatan penting: tema aktif '{active_theme}' punya baris "
+        f"{', '.join(overriding)} sendiri di theme.conf, yang bisa menimpa pengaturan "
+        "di atas (rEFInd memproses 'include' secara inline, baris terakhir yang menang). "
+        "Baris itu ikut dikomentari otomatis di theme.conf tema tersebut. Backup theme.conf "
+        "juga sudah dibuat otomatis, dan akan dikembalikan jika kamu jalankan "
+        "'refindmgr declutter --undo'."
+    )
+
 
 def cmd_declutter(args: argparse.Namespace) -> None:
     """Rapikan tampilan boot rEFInd: sembunyikan ikon tools yang jarang dipakai
@@ -192,6 +293,10 @@ def cmd_declutter(args: argparse.Namespace) -> None:
     dll.) dan hanya sisakan Shutdown & Reboot, tanpa mengubah daftar OS yang
     terdeteksi. Semua perubahan ditulis ke refind.conf lewat conf_mod, dengan
     backup otomatis, jadi bisa dibalik lewat 'declutter --undo' atau 'restore'.
+
+    Juga memeriksa apakah tema aktif (jika ada) punya baris 'showtools'/
+    'scanfor' sendiri di theme.conf-nya yang bisa menimpa pengaturan di atas --
+    lihat _declutter_theme_override_note.
     """
     refind_dir = _resolve_refind_dir(args)
     _warn_if_not_root()
@@ -202,26 +307,42 @@ def cmd_declutter(args: argparse.Namespace) -> None:
     conf_mod.backup(conf_path)
     if args.undo:
         new_lines = conf_mod.unset_global_option(lines, "showtools")
+        # Turut membersihkan token lama ini kalau masih aktif dari versi
+        # refindmgr sebelumnya (versi ini sendiri tidak lagi menulisnya).
         new_lines = conf_mod.unset_global_option(new_lines, "scanfor")
+        new_lines = conf_mod.unset_global_option(new_lines, "scan_all_linux_kernels")
+        new_lines = conf_mod.unset_global_option(new_lines, "dont_scan_files")
+        new_lines = conf_mod.unset_global_option(new_lines, "dont_scan_dirs")
         conf_mod.write_lines(conf_path, new_lines)
+        theme_note = _declutter_theme_override_note(refind_dir, lines, undo=True)
         print(
             "Tampilan tools rEFInd dikembalikan ke pengaturan bawaan rEFInd sendiri "
-            "(baris 'showtools'/'scanfor' yang ditulis refindmgr dikomentari lagi).\n"
+            "(baris 'showtools' yang ditulis refindmgr dikomentari lagi; baris "
+            "'scanfor'/'scan_all_linux_kernels'/'dont_scan_files'/'dont_scan_dirs' peninggalan "
+            "versi refindmgr sebelumnya, jika ada, juga ikut dikomentari).\n"
             "Backup refind.conf sebelum ini juga sudah disimpan otomatis."
+            f"{theme_note}"
         )
         return
     new_lines = conf_mod.set_global_option(lines, "showtools", MINIMAL_SHOWTOOLS)
-    new_lines = conf_mod.set_global_option(new_lines, "scanfor", MINIMAL_SCANFOR)
     conf_mod.write_lines(conf_path, new_lines)
+    theme_note = _declutter_theme_override_note(refind_dir, new_lines, undo=False)
     print(
-        "Tampilan boot dirapikan: baris bawah rEFInd sekarang cuma menampilkan "
-        "'Shutdown' dan 'Reboot' -- ikon shell/memtest/mok_tool/about/hidden tags/"
-        "firmware setup/dll. disembunyikan. Daftar OS di baris atas tidak diubah.\n"
-        f"(Ditulis ke refind.conf: 'showtools {MINIMAL_SHOWTOOLS}' dan "
-        f"'scanfor {MINIMAL_SCANFOR}'.)\n"
-        "Reboot untuk melihat hasilnya. Backup refind.conf sebelum ini sudah "
-        "disimpan otomatis -- jalankan 'refindmgr declutter --undo' atau "
-        "'refindmgr restore' kapan saja untuk mengembalikannya."
+        "Tampilan boot dirapikan:\n"
+        "- Baris bawah rEFInd sekarang cuma menampilkan 'Shutdown' dan 'Reboot' -- ikon "
+        "shell/memtest/mok_tool/about/hidden tags/firmware setup/dll. disembunyikan.\n"
+        f"(Ditulis ke refind.conf: 'showtools {MINIMAL_SHOWTOOLS}'.)\n"
+        "CATATAN: declutter versi ini SENGAJA tidak lagi menyentuh 'scanfor', "
+        "'scan_all_linux_kernels', atau 'dont_scan_files' sama sekali -- dua kali "
+        "perubahan otomatis di opsi-opsi itu terbukti membuat entri OS asli (Ubuntu) "
+        "ikut hilang total di layar boot pada pengujian nyata, jadi sekarang declutter "
+        "hanya menjamin aman: baris tools saja. Kalau kamu masih ingin menyembunyikan "
+        "entri kernel mentah/loader duplikat, lakukan itu MANUAL dan bertahap (satu opsi, "
+        "reboot, cek, baru lanjut opsi berikutnya) -- lihat README.md bagian "
+        "'Menyembunyikan entri OS duplikat (manual, opsional)'.\n"
+        "Backup refind.conf sebelum ini sudah disimpan otomatis -- jalankan "
+        "'refindmgr declutter --undo' atau 'refindmgr restore' kapan saja untuk mengembalikannya."
+        f"{theme_note}"
     )
 
 
@@ -253,6 +374,14 @@ def cmd_restore(args: argparse.Namespace) -> None:
 def cmd_doctor(args: argparse.Namespace) -> None:
     refind_dir = detect_refind_dir(_refind_dir_arg(args))
     print("=== Diagnostik refindmgr ===")
+    # Selalu cetak versi refindmgr yang SEDANG BERJALAN di baris pertama.
+    # Ini penting untuk audit itu sendiri: cara paling gampang membedakan
+    # "perbaikan belum berhasil" dari "perbaikan belum ter-deploy sama sekali"
+    # (misalnya lupa jalankan ulang 'sudo ./install.sh' setelah menarik/
+    # extract kode baru, sehingga /usr/local/bin/refindmgr masih menjalankan
+    # kode lama) adalah membandingkan angka versi ini dengan yang tercantum
+    # di README/rilis terbaru.
+    print(f"[INFO]    Versi refindmgr yang berjalan sekarang: {__version__}")
     if refind_dir is None:
         print("[GAGAL] Folder rEFInd tidak ditemukan otomatis.")
         print("        Coba jalankan dengan --refind-dir /path/ke/EFI/refind")
@@ -263,16 +392,130 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         status = "OK" if conf_path.is_file() else "GAGAL"
         print(f"[{status}]    refind.conf: {conf_path}")
         if conf_path.is_file():
-            active_list = conf_mod.get_active_themes(conf_mod.read_lines(conf_path))
+            conf_lines = conf_mod.read_lines(conf_path)
+            active_list = conf_mod.get_active_themes(conf_lines)
             if len(active_list) > 1:
                 print(
                     f"[PERINGATAN]    Ada {len(active_list)} tema aktif sekaligus di refind.conf "
                     f"({', '.join(active_list)}). Jalankan 'refindmgr activate <nama>' untuk merapikannya."
                 )
+            _print_manual_stanza_audit(conf_lines)
     git_ok = themes_mod.is_git_available()
     print(f"[{'OK' if git_ok else 'PERINGATAN'}]    git terpasang di PATH" + ("" if git_ok else " (diperlukan untuk install dari URL)"))
     root_ok = system_mod.is_root()
     print(f"[{'OK' if root_ok else 'INFO'}]    dijalankan sebagai root" + ("" if root_ok else " (perlu sudo untuk operasi yang menulis ke EFI)"))
+    if refind_dir is not None:
+        _print_esp_loader_audit(refind_dir)
+    _print_boot_kernel_audit()
+
+
+def _print_boot_kernel_audit() -> None:
+    """Cetak file kernel Linux mentah (vmlinuz*/bzImage*/kernel*) dan
+    'refind_linux.conf' yang ditemukan di /boot pada sistem yang berjalan.
+
+    Ini di luar cakupan _print_esp_loader_audit (yang hanya melihat ESP),
+    karena /boot di Debian/Ubuntu biasanya berada di filesystem Linux yang
+    berbeda dari ESP. Kalau ada 'refind_linux.conf' di sini, rEFInd akan
+    tetap menampilkan entri kernel itu (ikon Tux/penguin) WALAUPUN
+    'scan_all_linux_kernels' sudah diset ke false -- ini bukan bug, tapi
+    perilaku resmi rEFInd (kehadiran refind_linux.conf = niat eksplisit).
+    """
+    found = system_mod.find_boot_kernel_files()
+    print("\n=== Kernel mentah & refind_linux.conf di /boot ===")
+    if not found:
+        print("  (tidak ada file kernel mentah atau refind_linux.conf ditemukan di /boot)")
+        return
+    for name in found:
+        print(f"  - /boot/{name}")
+    if any(name == "refind_linux.conf" for name in found):
+        print(
+            "[INFO]    Ada 'refind_linux.conf' di /boot -- ini membuat rEFInd tetap "
+            "menampilkan entri kernel mentah (ikon penguin) meski 'scan_all_linux_kernels' "
+            "sudah false, karena rEFInd menganggap file ini sebagai tanda niat eksplisit. "
+            "Kalau entri penguin ini yang tidak diinginkan (karena OS sudah punya entri "
+            "GRUB/shim sendiri), satu-satunya cara menyembunyikannya adalah menghapus/"
+            "memindahkan refind_linux.conf, atau menambahkan path kernelnya (mis. "
+            "'/boot/vmlinuz-5.15.0-91-generic') ke dont_scan_files -- perlu diperbarui "
+            "tiap kali versi kernel berganti, jadi hati-hati."
+        )
+
+
+def _print_manual_stanza_audit(conf_lines: list) -> None:
+    """Cetak semua blok 'menuentry' (stanza boot manual) yang ditemukan di
+    refind.conf, dan tandai mana yang AKTIF (tidak ada baris 'disabled').
+
+    Ini penting karena declutter (showtools/scanfor/scan_all_linux_kernels/
+    dont_scan_files) HANYA mengatur proses auto-scan rEFInd -- tidak satu pun
+    dari opsi itu menyaring stanza 'menuentry' manual. refind.conf-sample yang
+    sering ikut dipasang otomatis oleh 'refind-install' di Debian/Ubuntu
+    menyertakan contoh blok seperti ini untuk Ubuntu, langsung menunjuk ke
+    /EFI/ubuntu/grubx64.efi, dinonaktifkan lewat baris 'disabled' di dalamnya.
+    Kalau baris 'disabled' itu hilang/pernah terhapus, stanza itu AKTIF dan
+    akan selalu tampil sebagai entri boot terpisah tanpa ikon OS (karena tidak
+    ada baris 'icon' di dalamnya) -- ikon generik/kubus/ketupat -- dan TIDAK
+    akan pernah hilang lewat opsi declutter manapun, karena bukan hasil scan.
+    """
+    stanzas = conf_mod.find_manual_stanzas(conf_lines)
+    if not stanzas:
+        return
+    print("\n=== Stanza boot manual ('menuentry') di refind.conf ===")
+    active_unnamed_icon = []
+    for stanza in stanzas:
+        if stanza["commented"]:
+            tag = "[dikomentari, tidak aktif]"
+        elif stanza["disabled"]:
+            tag = "[nonaktif via 'disabled']"
+        else:
+            tag = "[AKTIF]"
+            active_unnamed_icon.append(stanza["name"])
+        print(f"  {tag}  menuentry \"{stanza['name']}\" (baris {stanza['start_line'] + 1})")
+    if active_unnamed_icon:
+        names = ", ".join(active_unnamed_icon)
+        print(
+            f"[PERINGATAN]    Stanza manual berikut AKTIF dan tidak difilter oleh declutter sama "
+            f"sekali: {names}. Kalau salah satu ini yang membuat entri OS duplikat berikon generik/"
+            "kubus/ketupat, tambahkan baris 'disabled' di dalam blok 'menuentry' tersebut di "
+            "refind.conf (atau hapus blok itu), lalu simpan (refindmgr akan tetap membuat backup "
+            "otomatis kalau kamu edit lewat 'refindmgr backup' sebelumnya)."
+        )
+
+
+def _print_esp_loader_audit(refind_dir: Path) -> None:
+    """Cetak semua file '*.efi' lain yang ditemukan di ESP yang sama dengan
+    rEFInd (di luar folder rEFInd sendiri & EFI/tools), dan tandai mana yang
+    sudah tercakup oleh 'dont_scan_files' bawaan declutter (MINIMAL_DONT_SCAN_FILES)
+    dan mana yang belum.
+
+    Ini adalah bagian "audit" nyata yang diminta pengguna: daripada menebak
+    nama file loader duplikat lewat asumsi/dokumentasi saja, tool ini melihat
+    langsung isi ESP yang sebenarnya, supaya kalau declutter masih belum
+    menghilangkan sebuah entri, kita punya daftar file konkret untuk dicek --
+    bukan tebakan lagi.
+    """
+    loader_files = system_mod.list_esp_loader_files(refind_dir)
+    print("\n=== Audit loader di ESP (di luar folder rEFInd & EFI/tools) ===")
+    if not loader_files:
+        print("[INFO]    Tidak ada file .efi lain ditemukan (atau root ESP tidak bisa ditebak).")
+        return
+    covered_names = {
+        item.strip().lower()
+        for item in MINIMAL_DONT_SCAN_FILES.lstrip("+").strip().split(",")
+        if item.strip()
+    }
+    for rel_path in loader_files:
+        basename = rel_path.rsplit("/", 1)[-1].lower()
+        is_covered = basename in covered_names or rel_path.lower() in covered_names
+        tag = "[disembunyikan oleh declutter]" if is_covered else "[TIDAK disembunyikan]"
+        print(f"  {tag}  {rel_path}")
+    uncovered = [p for p in loader_files if p.rsplit("/", 1)[-1].lower() not in covered_names and p.lower() not in covered_names]
+    if uncovered:
+        print(
+            "[PERINGATAN]    Ada file .efi yang belum tercakup 'dont_scan_files' di atas. "
+            "Kalau salah satu di antaranya ternyata membuat entri OS duplikat yang tidak "
+            "diinginkan (ikon generik/kubus/ketupat), tambahkan nama filenya (atau path "
+            "relatifnya, misal 'EFI/BOOT/bootx64.efi') ke MINIMAL_DONT_SCAN_FILES di cli.py "
+            "lalu jalankan ulang 'refindmgr declutter'."
+        )
 
 
 def _version_tuple(version: str) -> tuple:
@@ -332,11 +575,74 @@ def _ensure_refind_version_pinned(args: argparse.Namespace, manager: Optional["s
     try:
         exact_version = system_mod.pin_refind_version(manager, target=target)
     except system_mod.BootstrapError as exc:
-        # Bukan fatal: kegagalan pinning versi tidak seharusnya membatalkan proses
-        # setup rEFInd itu sendiri (yang sudah berhasil sampai titik ini).
-        print(f"PERINGATAN: gagal {action_desc}: {exc}")
-        return
+        if manager.name == "apt":
+            # Banyak repo apt distro (termasuk Ubuntu) hanya menyediakan rilis
+            # rEFInd TERBARU, bukan versi lama seperti target di sini -- itu
+            # sebabnya pin_refind_version gagal. Jalur cadangan: unduh paket
+            # .deb resmi versi target langsung dari SourceForge (bukan repo
+            # distro) dan pasang lewat dpkg, supaya versi target tetap benar
+            # -benar tercapai alih-alih hanya menampilkan peringatan.
+            print(
+                f"PERINGATAN: gagal {action_desc} lewat repo apt: {exc}\n"
+                "Mencoba jalur cadangan: mengunduh paket .deb resmi rEFInd langsung dari "
+                "SourceForge (bukan repo distro) dan memasangnya lewat dpkg..."
+            )
+            try:
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    deb_path = os.path.join(tmp_dir, f"refind_{target}-1_amd64.deb")
+                    system_mod.download_refind_deb(target, deb_path)
+                    system_mod.install_deb_file(deb_path)
+            except system_mod.BootstrapError as fallback_exc:
+                print(
+                    f"PERINGATAN: jalur cadangan juga gagal: {fallback_exc}\n"
+                    f"Pasang manual versi {target} dari rilis resmi rEFInd:\n"
+                    "  https://sourceforge.net/projects/refind/files/"
+                )
+                return
+            exact_version = target
+            print(f"Berhasil {action_desc} lewat paket .deb resmi dari SourceForge (bukan repo apt).")
+        else:
+            # Bukan fatal: kegagalan pinning versi tidak seharusnya membatalkan proses
+            # setup rEFInd itu sendiri (yang sudah berhasil sampai titik ini).
+            print(f"PERINGATAN: gagal {action_desc}: {exc}")
+            return
     print(f"Berhasil {action_desc} (paket terpasang: refind={exact_version}).")
+
+
+def _sync_refind_esp_binary(args: argparse.Namespace) -> None:
+    """Jalankan ulang skrip resmi 'refind-install' supaya binari rEFInd yang ada
+    di partisi EFI (refind_x64.efi) benar-benar cocok dengan versi paket yang
+    baru saja dipastikan oleh _ensure_refind_version_pinned.
+
+    Bug yang diperbaiki lewat fungsi ini: mengganti versi PAKET rEFInd lewat
+    apt/dnf/zypper (pin_refind_version) hanya mengubah catatan dpkg/rpm/pacman
+    -- itu TIDAK otomatis menyalin ulang binari baru ke partisi EFI. Tanpa
+    langkah ini, refind_x64.efi di ESP bisa tetap versi LAMA selamanya
+    (termasuk versi yang masih kena bug upstream 'showtools' di 0.14.2+) walau
+    dpkg sudah melaporkan versi target terpasang, sehingga 'refindmgr declutter'
+    maupun pin-versi terlihat "berhasil" tapi tidak berefek apa pun di boot.
+    """
+    print(
+        "Menjalankan skrip resmi 'refind-install' supaya binari rEFInd di partisi EFI\n"
+        "benar-benar cocok dengan versi paket yang terpasang (mengganti versi paket saja\n"
+        "TIDAK otomatis memperbarui file di partisi EFI)."
+    )
+    if not args.yes:
+        print(
+            "Ini baru pratinjau -- belum ada perubahan apa pun yang dibuat.\n"
+            "Jalankan ulang dengan 'sudo refindmgr setup --yes' untuk benar-benar menerapkannya."
+        )
+        return
+    if not system_mod.is_root():
+        raise CLIError("Perintah ini butuh akses root. Jalankan ulang dengan: sudo refindmgr setup --yes")
+    try:
+        output = system_mod.run_refind_install()
+    except system_mod.BootstrapError as exc:
+        print(f"PERINGATAN: gagal menjalankan refind-install: {exc}")
+        return
+    if output.strip():
+        print(output.strip())
+    print("Binari rEFInd di partisi EFI sudah disegarkan supaya cocok dengan versi paket saat ini.")
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
@@ -358,6 +664,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
     if refind_dir is not None:
         print(f"rEFInd sudah terpasang di {refind_dir}. Tidak perlu instalasi ulang.")
         _ensure_refind_version_pinned(args, manager)
+        _sync_refind_esp_binary(args)
         return
 
     print("rEFInd belum terdeteksi terpasang di sistem ini.\n")
@@ -474,7 +781,7 @@ def _print_status_banner(top_args: argparse.Namespace) -> None:
     refind_dir = detect_refind_dir(_refind_dir_arg(top_args))
     rule = f"{_CYAN}{'=' * 56}{_RESET}"
     print(rule)
-    print(f"  {_BOLD}{_MAGENTA}refindmgr{_RESET}{_DIM} -- rEFInd Theme Manager{_RESET}")
+    print(f"  {_BOLD}{_MAGENTA}refindmgr{_RESET}{_DIM} -- rEFInd Theme Manager (v{__version__}){_RESET}")
     print(rule)
     if refind_dir is None:
         print(f"  {_RED}x{_RESET} rEFInd belum terdeteksi di lokasi umum.")

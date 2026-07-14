@@ -56,6 +56,17 @@ def _find_theme_conf(root: Path) -> Optional[Path]:
     return None
 
 
+def theme_conf_path(refind_dir: Path, theme_name: str) -> Optional[Path]:
+    """Kembalikan path theme.conf milik `theme_name` jika tema itu terpasang,
+    atau None jika tidak. Dipakai oleh 'declutter' untuk memeriksa apakah tema
+    aktif punya baris 'showtools'/'scanfor' sendiri yang bisa menimpa
+    pengaturan refind.conf utama (lihat cli.py: rEFInd memproses 'include'
+    secara inline, jadi baris terakhir yang menang, apa pun urutan file-nya).
+    """
+    candidate = themes_dir(refind_dir) / theme_name / "theme.conf"
+    return candidate if candidate.is_file() else None
+
+
 def list_installed(refind_dir: Path) -> List[str]:
     t_dir = themes_dir(refind_dir)
     if not t_dir.is_dir():
