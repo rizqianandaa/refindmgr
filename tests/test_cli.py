@@ -98,6 +98,55 @@ class TestCliSmoke(unittest.TestCase):
             self.assertIn("telah dihapus", remove_result.stdout)
 
 
+    def test_declutter_sets_showtools_and_scanfor(self):
+        root = str(Path(__file__).resolve().parent.parent)
+        with TemporaryDirectory() as tmp:
+            refind_dir = Path(tmp) / "refind"
+            refind_dir.mkdir()
+            (refind_dir / "refind.conf").write_text(
+                "timeout 5\nshowtools shell, memtest, gdisk, about, hidden_tags, shutdown, reboot, firmware\n"
+            )
+            result = run_cli(["--refind-dir", str(refind_dir), "declutter"], cwd=root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("dirapikan", result.stdout)
+            conf_text = (refind_dir / "refind.conf").read_text()
+            self.assertIn("showtools shutdown,reboot", conf_text)
+            self.assertIn("scanfor internal,external,optical,manual", conf_text)
+            # A backup of the pre-declutter refind.conf must exist.
+            backups = list(refind_dir.glob("refind.conf.*.bak"))
+            self.assertEqual(len(backups), 1)
+            self.assertIn("showtools shell, memtest", backups[0].read_text())
+
+    def test_declutter_undo_restores_default_behavior(self):
+        root = str(Path(__file__).resolve().parent.parent)
+        with TemporaryDirectory() as tmp:
+            refind_dir = Path(tmp) / "refind"
+            refind_dir.mkdir()
+            (refind_dir / "refind.conf").write_text("timeout 5\n")
+            first = run_cli(["--refind-dir", str(refind_dir), "declutter"], cwd=root)
+            self.assertEqual(first.returncode, 0, first.stderr)
+
+            undo = run_cli(["--refind-dir", str(refind_dir), "declutter", "--undo"], cwd=root)
+            self.assertEqual(undo.returncode, 0, undo.stderr)
+            self.assertIn("dikembalikan", undo.stdout)
+            conf_text = (refind_dir / "refind.conf").read_text()
+            self.assertIn("# showtools shutdown,reboot", conf_text)
+            self.assertIn("# scanfor internal,external,optical,manual", conf_text)
+
+    def test_declutter_fails_gracefully_without_refind_conf(self):
+        # Regression guard: detect_refind_dir() already requires refind.conf to
+        # exist at the given path, so an empty --refind-dir folder is reported
+        # as "folder not found" (same behavior as every other cmd_* here, e.g.
+        # test_list_without_refind_dir_fails_gracefully) rather than reaching
+        # cmd_declutter's own (currently unreachable in practice) conf.is_file() check.
+        root = str(Path(__file__).resolve().parent.parent)
+        with TemporaryDirectory() as tmp:
+            refind_dir = Path(tmp) / "refind"
+            refind_dir.mkdir()
+            result = run_cli(["--refind-dir", str(refind_dir), "declutter"], cwd=root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Tidak menemukan", result.stderr)
+
     def test_interactive_menu_exits_cleanly_with_no_input(self):
         # When stdin is closed (e.g. non-interactive CI), running refindmgr
         # with no subcommand must open the menu and then exit cleanly instead

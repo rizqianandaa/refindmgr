@@ -115,3 +115,69 @@ def remove_theme_includes(lines: List[str], theme_name: str) -> List[str]:
             and match.group("name") == theme_name
         )
     ]
+
+
+# ---------------------------------------------------------------------------
+# Opsi global generik (satu baris 'token nilai'), dipakai misalnya oleh fitur
+# 'declutter' untuk mengatur 'showtools' dan 'scanfor' -- lihat cli.py.
+# ---------------------------------------------------------------------------
+
+
+def _global_option_re(token: str) -> re.Pattern:
+    return re.compile(rf"^(?P<comment>#\s*)?(?P<token>{re.escape(token)})\b(?P<rest>.*)$", re.IGNORECASE)
+
+
+def find_global_option(lines: List[str], token: str) -> List[Tuple[int, bool, str]]:
+    """Cari semua baris yang mengatur `token` (misal 'showtools' atau 'scanfor'),
+    aktif maupun yang dikomentari. Kembalikan list (index_baris, aktif_atau_tidak,
+    nilai_parameter_setelah_token)."""
+    pattern = _global_option_re(token)
+    results = []
+    for idx, line in enumerate(lines):
+        match = pattern.match(line.strip())
+        if match:
+            is_active = not match.group("comment")
+            results.append((idx, is_active, match.group("rest").strip()))
+    return results
+
+
+def get_global_option(lines: List[str], token: str) -> Optional[str]:
+    """Kembalikan nilai baris `token` yang sedang AKTIF, atau None jika tidak ada
+    baris aktif untuk token tersebut (rEFInd lalu memakai nilai bawaannya)."""
+    for _, is_active, rest in find_global_option(lines, token):
+        if is_active:
+            return rest
+    return None
+
+
+def set_global_option(lines: List[str], token: str, value: str) -> List[str]:
+    """Kembalikan salinan `lines` baru dengan `token` diset ke `value` (baris
+    'token value' aktif). Baris `token` aktif pertama yang sudah ada akan
+    ditimpa; baris aktif duplikat lainnya (jika ada, biasanya dari edit manual
+    yang tidak konsisten) ikut dikomentari supaya cuma satu yang aktif. Baris
+    yang sudah dikomentari sebelumnya dibiarkan apa adanya. Jika `token` belum
+    pernah muncul sama sekali, baris baru ditambahkan di akhir file."""
+    new_lines = list(lines)
+    matches = find_global_option(new_lines, token)
+    target_line = f"{token} {value}" if value else token
+    if matches:
+        first_idx = matches[0][0]
+        new_lines[first_idx] = target_line
+        for idx, is_active, _ in matches[1:]:
+            if is_active:
+                new_lines[idx] = f"# {new_lines[idx].strip()}"
+    else:
+        if new_lines and new_lines[-1].strip() != "":
+            new_lines.append("")
+        new_lines.append(target_line)
+    return new_lines
+
+
+def unset_global_option(lines: List[str], token: str) -> List[str]:
+    """Komentari semua baris `token` yang aktif, sehingga rEFInd kembali memakai
+    nilai bawaannya sendiri untuk opsi tersebut (dipakai oleh 'declutter --undo')."""
+    new_lines = list(lines)
+    for idx, is_active, _ in find_global_option(new_lines, token):
+        if is_active:
+            new_lines[idx] = f"# {new_lines[idx].strip()}"
+    return new_lines

@@ -176,6 +176,55 @@ def cmd_remove(args: argparse.Namespace) -> None:
     print(f"Tema '{args.name}' telah dihapus.")
 
 
+# Preset 'declutter': hanya menyisakan Shutdown & Reboot di baris tools (baris
+# bawah), dan menjaga baris OS (baris atas) pada metode scan yang paling umum
+# (internal/external/optical/manual), tanpa opsi 'firmware' yang menambahkan
+# tag boot dari daftar boot firmware -- salah satu sumber tag 'aneh' yang
+# sering muncul di layar boot rEFInd, seperti dikeluhkan banyak pengguna.
+# Lihat README.md bagian 'Rapikan tampilan boot (declutter)' untuk rincian.
+MINIMAL_SHOWTOOLS = "shutdown,reboot"
+MINIMAL_SCANFOR = "internal,external,optical,manual"
+
+
+def cmd_declutter(args: argparse.Namespace) -> None:
+    """Rapikan tampilan boot rEFInd: sembunyikan ikon tools yang jarang dipakai
+    (shell, memtest, gdisk, mok_tool, about, hidden_tags, firmware, fwupdate,
+    dll.) dan hanya sisakan Shutdown & Reboot, tanpa mengubah daftar OS yang
+    terdeteksi. Semua perubahan ditulis ke refind.conf lewat conf_mod, dengan
+    backup otomatis, jadi bisa dibalik lewat 'declutter --undo' atau 'restore'.
+    """
+    refind_dir = _resolve_refind_dir(args)
+    _warn_if_not_root()
+    conf_path = refind_conf_path(refind_dir)
+    if not conf_path.is_file():
+        raise CLIError(f"refind.conf tidak ditemukan di {refind_dir}")
+    lines = conf_mod.read_lines(conf_path)
+    conf_mod.backup(conf_path)
+    if args.undo:
+        new_lines = conf_mod.unset_global_option(lines, "showtools")
+        new_lines = conf_mod.unset_global_option(new_lines, "scanfor")
+        conf_mod.write_lines(conf_path, new_lines)
+        print(
+            "Tampilan tools rEFInd dikembalikan ke pengaturan bawaan rEFInd sendiri "
+            "(baris 'showtools'/'scanfor' yang ditulis refindmgr dikomentari lagi).\n"
+            "Backup refind.conf sebelum ini juga sudah disimpan otomatis."
+        )
+        return
+    new_lines = conf_mod.set_global_option(lines, "showtools", MINIMAL_SHOWTOOLS)
+    new_lines = conf_mod.set_global_option(new_lines, "scanfor", MINIMAL_SCANFOR)
+    conf_mod.write_lines(conf_path, new_lines)
+    print(
+        "Tampilan boot dirapikan: baris bawah rEFInd sekarang cuma menampilkan "
+        "'Shutdown' dan 'Reboot' -- ikon shell/memtest/mok_tool/about/hidden tags/"
+        "firmware setup/dll. disembunyikan. Daftar OS di baris atas tidak diubah.\n"
+        f"(Ditulis ke refind.conf: 'showtools {MINIMAL_SHOWTOOLS}' dan "
+        f"'scanfor {MINIMAL_SCANFOR}'.)\n"
+        "Reboot untuk melihat hasilnya. Backup refind.conf sebelum ini sudah "
+        "disimpan otomatis -- jalankan 'refindmgr declutter --undo' atau "
+        "'refindmgr restore' kapan saja untuk mengembalikannya."
+    )
+
+
 def cmd_backup(args: argparse.Namespace) -> None:
     refind_dir = _resolve_refind_dir(args)
     _warn_if_not_root()
@@ -354,7 +403,7 @@ def _print_status_banner(top_args: argparse.Namespace) -> None:
     print(rule)
     if refind_dir is None:
         print(f"  {_RED}x{_RESET} rEFInd belum terdeteksi di lokasi umum.")
-        print(f"    {_DIM}Pakai menu '10) Pasang rEFInd' di bawah, atau set --refind-dir.{_RESET}")
+        print(f"    {_DIM}Pakai menu '12) Pasang rEFInd itu sendiri (setup)' di bawah, atau set --refind-dir.{_RESET}")
     else:
         installed, active_list = _theme_status(refind_dir)
         active = active_list[0] if active_list else None
@@ -379,7 +428,7 @@ def _require_refind_dir(top_args: argparse.Namespace) -> Optional[Path]:
     if refind_dir is None:
         print(
             f"{_RED}Folder rEFInd tidak ditemukan.{_RESET} "
-            "Coba menu '10) Pasang rEFInd itu sendiri (setup)' atau jalankan ulang dengan --refind-dir."
+            "Coba menu '12) Pasang rEFInd itu sendiri (setup)' atau jalankan ulang dengan --refind-dir."
         )
     return refind_dir
 
@@ -445,6 +494,30 @@ def _menu_remove(top_args: argparse.Namespace) -> None:
     cmd_remove(argparse.Namespace(name=name, **_carry(top_args)))
 
 
+def _menu_declutter(top_args: argparse.Namespace) -> None:
+    if _require_refind_dir(top_args) is None:
+        return
+    print(
+        "Ini akan menyembunyikan ikon-ikon tools yang jarang dipakai di baris bawah\n"
+        "rEFInd (shell, memtest, gdisk, mok_tool, about, hidden tags, firmware setup,\n"
+        "fwupdate, dll.) dan hanya menyisakan Shutdown & Reboot. Daftar OS di baris\n"
+        "atas TIDAK ikut diubah/disembunyikan."
+    )
+    if not _confirm("Rapikan tampilan boot sekarang?", default=True):
+        print("Dibatalkan.")
+        return
+    cmd_declutter(argparse.Namespace(undo=False, **_carry(top_args)))
+
+
+def _menu_declutter_undo(top_args: argparse.Namespace) -> None:
+    if _require_refind_dir(top_args) is None:
+        return
+    if not _confirm("Kembalikan tampilan tools rEFInd ke pengaturan bawaan (batalkan declutter)?"):
+        print("Dibatalkan.")
+        return
+    cmd_declutter(argparse.Namespace(undo=True, **_carry(top_args)))
+
+
 def _menu_backup(top_args: argparse.Namespace) -> None:
     if _require_refind_dir(top_args) is None:
         return
@@ -502,10 +575,17 @@ _MENU_SECTIONS = [
         ],
     ),
     (
+        "Tampilan boot",
+        [
+            ("9", "Rapikan tampilan boot (OS + Shutdown + Reboot saja)", _menu_declutter),
+            ("10", "Kembalikan tampilan tools ke bawaan rEFInd", _menu_declutter_undo),
+        ],
+    ),
+    (
         "Sistem",
         [
-            ("9", "Diagnostik (doctor)", _menu_doctor),
-            ("10", "Pasang rEFInd itu sendiri (setup)", _menu_setup),
+            ("11", "Diagnostik (doctor)", _menu_doctor),
+            ("12", "Pasang rEFInd itu sendiri (setup)", _menu_setup),
         ],
     ),
 ]
@@ -627,6 +707,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_remove = sub.add_parser("remove", help="Hapus tema yang terpasang.", parents=[common])
     p_remove.add_argument("name")
     p_remove.set_defaults(func=cmd_remove)
+
+    p_declutter = sub.add_parser(
+        "declutter",
+        help="Rapikan tampilan boot: sisakan cuma daftar OS + Shutdown + Reboot (sembunyikan ikon tools lain).",
+        parents=[common],
+    )
+    p_declutter.add_argument(
+        "--undo",
+        action="store_true",
+        help="Kembalikan showtools/scanfor ke pengaturan bawaan rEFInd (batalkan declutter sebelumnya).",
+    )
+    p_declutter.set_defaults(func=cmd_declutter)
 
     p_backup = sub.add_parser("backup", help="Buat backup refind.conf saat ini.", parents=[common])
     p_backup.set_defaults(func=cmd_backup)

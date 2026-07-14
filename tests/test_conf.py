@@ -138,6 +138,90 @@ class TestBackupRestore(unittest.TestCase):
                 self.assertTrue(path.is_file())
 
 
+class TestFindGlobalOption(unittest.TestCase):
+    def test_finds_active_line(self):
+        lines = ["timeout 5", "showtools shell, memtest, gdisk"]
+        result = conf_mod.find_global_option(lines, "showtools")
+        self.assertEqual(result, [(1, True, "shell, memtest, gdisk")])
+
+    def test_finds_commented_line(self):
+        lines = ["# showtools shell, memtest"]
+        result = conf_mod.find_global_option(lines, "showtools")
+        self.assertEqual(result, [(0, False, "shell, memtest")])
+
+    def test_no_matches_returns_empty(self):
+        self.assertEqual(conf_mod.find_global_option(["timeout 5"], "showtools"), [])
+
+    def test_does_not_match_unrelated_token_with_same_prefix(self):
+        # 'scanfor' must not match a 'scanfor2' style token (defensive check,
+        # even though rEFInd itself has no such token).
+        lines = ["scanfor2 something"]
+        self.assertEqual(conf_mod.find_global_option(lines, "scanfor"), [])
+
+
+class TestGetGlobalOption(unittest.TestCase):
+    def test_returns_active_value(self):
+        lines = ["showtools shell, memtest"]
+        self.assertEqual(conf_mod.get_global_option(lines, "showtools"), "shell, memtest")
+
+    def test_returns_none_when_only_commented(self):
+        lines = ["# showtools shell, memtest"]
+        self.assertIsNone(conf_mod.get_global_option(lines, "showtools"))
+
+    def test_returns_none_when_absent(self):
+        self.assertIsNone(conf_mod.get_global_option(["timeout 5"], "showtools"))
+
+
+class TestSetGlobalOption(unittest.TestCase):
+    def test_replaces_existing_active_line(self):
+        lines = ["timeout 5", "showtools shell, memtest, gdisk"]
+        new_lines = conf_mod.set_global_option(lines, "showtools", "shutdown,reboot")
+        self.assertIn("showtools shutdown,reboot", new_lines)
+        self.assertNotIn("showtools shell, memtest, gdisk", new_lines)
+        self.assertEqual(len(new_lines), 2)
+
+    def test_uncomments_and_replaces_commented_line(self):
+        lines = ["# showtools shell, memtest"]
+        new_lines = conf_mod.set_global_option(lines, "showtools", "shutdown,reboot")
+        self.assertEqual(new_lines, ["showtools shutdown,reboot"])
+
+    def test_appends_when_token_absent(self):
+        lines = ["timeout 5"]
+        new_lines = conf_mod.set_global_option(lines, "showtools", "shutdown,reboot")
+        self.assertIn("showtools shutdown,reboot", new_lines)
+        self.assertEqual(conf_mod.get_global_option(new_lines, "showtools"), "shutdown,reboot")
+
+    def test_comments_out_duplicate_active_lines(self):
+        lines = ["showtools shell", "showtools memtest"]
+        new_lines = conf_mod.set_global_option(lines, "showtools", "shutdown,reboot")
+        active = conf_mod.find_global_option(new_lines, "showtools")
+        active_only = [rest for _, is_active, rest in active if is_active]
+        self.assertEqual(active_only, ["shutdown,reboot"])
+
+    def test_idempotent_when_run_twice(self):
+        lines = ["showtools shell, memtest"]
+        once = conf_mod.set_global_option(lines, "showtools", "shutdown,reboot")
+        twice = conf_mod.set_global_option(once, "showtools", "shutdown,reboot")
+        self.assertEqual(once, twice)
+
+
+class TestUnsetGlobalOption(unittest.TestCase):
+    def test_comments_out_active_line(self):
+        lines = ["showtools shutdown,reboot"]
+        new_lines = conf_mod.unset_global_option(lines, "showtools")
+        self.assertIsNone(conf_mod.get_global_option(new_lines, "showtools"))
+        self.assertIn("# showtools shutdown,reboot", new_lines)
+
+    def test_no_op_when_already_commented(self):
+        lines = ["# showtools shutdown,reboot"]
+        new_lines = conf_mod.unset_global_option(lines, "showtools")
+        self.assertEqual(lines, new_lines)
+
+    def test_no_op_when_absent(self):
+        lines = ["timeout 5"]
+        self.assertEqual(conf_mod.unset_global_option(lines, "showtools"), lines)
+
+
 class TestReadWriteLines(unittest.TestCase):
     def test_write_then_read_roundtrip(self):
         with TemporaryDirectory() as tmp:
