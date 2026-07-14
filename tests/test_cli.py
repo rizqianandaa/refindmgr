@@ -1,8 +1,18 @@
+import argparse
+import io
 import subprocess
 import sys
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from refindmgr import cli as cli_mod
+from refindmgr import system as system_mod
 
 
 def run_cli(args, cwd):
@@ -176,6 +186,95 @@ class TestCliSmoke(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertIn("Sampai jumpa", result.stdout)
+
+
+class TestSetupVersionPinning(unittest.TestCase):
+    """Tests cmd_setup's rEFInd-version-pinning step in-process (rather than via
+    subprocess like the tests above), with system_mod.* patched out, so these
+    never touch a real package manager regardless of what happens to be
+    installed in the environment running the test suite.
+    """
+
+    APT_MANAGER = system_mod.PackageManagerInfo("apt", ["apt-get", "install", "-y", "refind"])
+
+    def _run_setup(self, refind_dir, yes=False):
+        args = argparse.Namespace(refind_dir=str(refind_dir), yes=yes)
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            cli_mod.cmd_setup(args)
+        return buffer.getvalue()
+
+    def _make_refind_dir(self, tmp):
+        refind_dir = Path(tmp) / "refind"
+        refind_dir.mkdir()
+        (refind_dir / "refind.conf").write_text("timeout 5\n")
+        return refind_dir
+
+    def test_already_pinned_reports_nothing_to_change(self):
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_refind_dir(tmp)
+            with patch.object(cli_mod.system_mod, "detect_package_manager", return_value=self.APT_MANAGER), \
+                 patch.object(cli_mod.system_mod, "get_installed_refind_version", return_value="0.14.1"), \
+                 patch.object(cli_mod.system_mod, "pin_refind_version") as pin_mock:
+                output = self._run_setup(refind_dir)
+                self.assertIn("sudah terpasang", output)
+                self.assertIn("Tidak ada yang perlu diubah", output)
+                pin_mock.assert_not_called()
+
+    def test_newer_installed_previews_downgrade_without_yes(self):
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_refind_dir(tmp)
+            with patch.object(cli_mod.system_mod, "detect_package_manager", return_value=self.APT_MANAGER), \
+                 patch.object(cli_mod.system_mod, "get_installed_refind_version", return_value="0.14.2"), \
+                 patch.object(cli_mod.system_mod, "pin_refind_version") as pin_mock:
+                output = self._run_setup(refind_dir, yes=False)
+                self.assertIn("menurunkan (downgrade)", output)
+                self.assertIn("pratinjau", output)
+                pin_mock.assert_not_called()
+
+    def test_older_installed_upgrades_with_yes(self):
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_refind_dir(tmp)
+            with patch.object(cli_mod.system_mod, "detect_package_manager", return_value=self.APT_MANAGER), \
+                 patch.object(cli_mod.system_mod, "get_installed_refind_version", return_value="0.13.3"), \
+                 patch.object(cli_mod.system_mod, "pin_refind_version", return_value="0.14.1-1") as pin_mock, \
+                 patch.object(cli_mod.system_mod, "is_root", return_value=True):
+                output = self._run_setup(refind_dir, yes=True)
+                self.assertIn("menaikkan (upgrade)", output)
+                self.assertIn("Berhasil", output)
+                pin_mock.assert_called_once()
+
+    def test_not_installed_previews_install_without_yes(self):
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_refind_dir(tmp)
+            with patch.object(cli_mod.system_mod, "detect_package_manager", return_value=self.APT_MANAGER), \
+                 patch.object(cli_mod.system_mod, "get_installed_refind_version", return_value=None), \
+                 patch.object(cli_mod.system_mod, "pin_refind_version") as pin_mock:
+                output = self._run_setup(refind_dir, yes=False)
+                self.assertIn("memasang paket rEFInd versi", output)
+                pin_mock.assert_not_called()
+
+    def test_pin_failure_is_a_warning_not_a_fatal_error(self):
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_refind_dir(tmp)
+            with patch.object(cli_mod.system_mod, "detect_package_manager", return_value=self.APT_MANAGER), \
+                 patch.object(cli_mod.system_mod, "get_installed_refind_version", return_value="0.14.2"), \
+                 patch.object(
+                     cli_mod.system_mod,
+                     "pin_refind_version",
+                     side_effect=system_mod.BootstrapError("repo tidak menyediakan 0.14.1"),
+                 ), \
+                 patch.object(cli_mod.system_mod, "is_root", return_value=True):
+                output = self._run_setup(refind_dir, yes=True)
+                self.assertIn("PERINGATAN", output)
+                self.assertIn("repo tidak menyediakan 0.14.1", output)
+
+    def test_no_manager_detected_skips_pinning_gracefully(self):
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_refind_dir(tmp)
+            with patch.object(cli_mod.system_mod, "detect_package_manager", return_value=None):
+                output = self._run_setup(refind_dir)
+                self.assertIn("melewati", output)
 
 
 if __name__ == "__main__":

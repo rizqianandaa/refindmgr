@@ -181,9 +181,23 @@ not something a config flag can safely auto-fix.
 Like every other write here, it backs up `refind.conf` automatically first, so
 `declutter --undo` or `refindmgr restore` always gets you back to where you started.
 
-> Known upstream quirk: some rEFInd 0.14.2+ builds have a reported bug where tool
-> icons can appear duplicated on screen regardless of `showtools` — that's a rEFInd
-> issue, not a refindmgr one. If you hit it, check for a rEFInd update/downgrade.
+> Known upstream quirk: rEFInd 0.14.2+ has a widely-reported bug where `showtools`
+> stops working correctly — the tools row keeps showing the full default icon set
+> (sometimes even duplicated) no matter what `showtools`/`scanfor` say in
+> `refind.conf`. This is a rEFInd issue, not a refindmgr one, and there's no
+> config-file workaround (`scanfor` in particular has nothing to do with the tools
+> row — see below). `refindmgr setup` mitigates it automatically by keeping the
+> installed rEFInd **package** pinned to 0.14.1, the last version unaffected by
+> this bug; see "Don't have rEFInd yet?" below.
+>
+> `scanfor` vs `showtools`, for clarity: `scanfor` only controls *where rEFInd looks
+> for other operating systems to boot* (internal/external/optical disks, manual
+> stanzas, etc.) — it has no effect on the tools icon row at all. Commenting it out
+> would not fix (or break) the tools-row bug; `declutter` writes
+> `internal,external,optical,manual`, which is simply rEFInd's own built-in default
+> written out explicitly, kept mainly to strip a `firmware` scan source some distros
+> add by default. The tools row is controlled solely by `showtools`, which is exactly
+> where the bug above lives.
 
 ### Supported theme sources
 
@@ -213,6 +227,31 @@ installs the `refind` package through it, then runs the **official** `refind-ins
 script from the rEFInd project itself. refindmgr never writes to the EFI
 partition/NVRAM with its own logic for this step. Other distros: follow the
 [official rEFInd install guide](https://www.rodsbooks.com/refind/installing.html).
+
+**Version pinning (works around the `showtools` bug above).** Every `setup` run
+(with or without an existing rEFInd install) also checks the installed `refind`
+package version and reconciles it to `0.14.1` — the last version unaffected by the
+0.14.2+ `showtools` bug:
+
+- Not installed yet → installs `0.14.1` directly instead of whatever the distro
+  considers "latest".
+- A newer version is installed → downgrades it to `0.14.1`.
+- An older version is installed → upgrades it to `0.14.1`.
+
+This only ever uses your distro's own package manager (`apt-get install
+--allow-downgrades refind=<version>`, `dnf install refind-<version>`, `zypper
+install --oldpackage refind=<version>`, ...) after confirming the exact version
+string is actually offered by your configured repos — it never guesses or drops in
+an upstream binary outside of that mechanism. If your distro's repo doesn't carry
+`0.14.1` (this isn't guaranteed everywhere, e.g. rolling-release repos that don't
+keep old builds), `setup` prints a clear warning and leaves your install untouched
+rather than silently installing the wrong version — in that case, see the official
+[rEFInd releases page](https://sourceforge.net/projects/refind/files/) for manual
+options. Pacman/Arch is not supported for automatic pinning for the same reason
+(Arch's repos don't retain old package versions).
+
+Like everything else in `setup`, this respects `--yes`: without it, you only get a
+preview of what would change.
 
 ## Security & backups
 
@@ -251,6 +290,22 @@ only be written by root. Add `sudo` for commands that change something.
 
 **rEFInd folder not detected automatically.** Check your EFI partition's location
 (`lsblk`/`sudo blkid`), then set it manually with `--refind-dir` or `REFIND_DIR`.
+
+**I pulled/extracted a newer refindmgr, ran `sudo ./install.sh` again, but the CLI
+still behaves like the old version (missing menu items, old text, etc).** This was a
+real bug in `install.sh` itself: it installed refindmgr into its private venv with a
+plain `pip install`, and pip treats a local-folder install as "already satisfied" and
+skips copying any files whenever the version number in `pyproject.toml` hasn't changed
+— even though the actual source code did change. `install.sh` now uses
+`pip install --force-reinstall --no-deps`, so it always deploys whatever code is
+currently on disk. If you're on an older `install.sh` that doesn't have this fix yet,
+force it manually:
+
+```bash
+sudo /opt/refindmgr/venv/bin/pip install --force-reinstall --no-deps /path/to/refindmgr
+```
+
+or just delete `/opt/refindmgr` and run `sudo ./install.sh` fresh.
 
 ## Project structure
 

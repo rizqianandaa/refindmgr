@@ -37,7 +37,15 @@ python3 -m venv "$VENV_DIR"
 
 echo "[2/4] Memasang refindmgr ke environment tersebut ..."
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet "$SCRIPT_DIR"
+# --force-reinstall --no-deps: pip's normal behavior treats a local-path install
+# as "already satisfied" and silently SKIPS copying any updated files whenever
+# the package version number (in pyproject.toml) hasn't changed -- even though
+# refindmgr's actual source code did change. Without this flag, re-running
+# install.sh after pulling/extracting a newer refindmgr would leave the OLD
+# code running in $VENV_DIR forever, with no error or warning about it.
+# --no-deps just skips reinstalling refindmgr's (currently nonexistent) runtime
+# dependencies, since only refindmgr's own files need to be refreshed here.
+"$VENV_DIR/bin/pip" install --quiet --force-reinstall --no-deps "$SCRIPT_DIR"
 
 echo "[3/4] Memasang command 'refindmgr' ke /usr/local/bin ..."
 cat > /usr/local/bin/refindmgr << WRAPPER
