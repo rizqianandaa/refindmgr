@@ -7,33 +7,13 @@ partition or hand-editing `refind.conf`.
 It now also ships with a friendly **interactive menu** — just run `refindmgr` with no
 arguments and pick what you want from a list, no flags to memorize.
 
-## Features
-
-- **Interactive menu** — run `refindmgr` with no arguments to get a numbered menu with
-  a live status banner (rEFInd detected? which theme is active? running as root?).
-- **Curated theme catalog** — install popular themes with a single short key.
-- **Install themes from anywhere** — git URL, local folder, or a local `.zip` file.
-- **Switch the active theme** in one command, no manual `refind.conf` editing.
-- **Automatic backups** every time `refind.conf` is changed, plus a `restore` command
-  to roll back at any time.
-- **Theme name validation** that blocks path traversal (`../../etc` and similar are
-  always rejected).
-- **`refindmgr setup`** — installs rEFInd itself (via the system package manager plus
-  the official `refind-install` script) if it isn't present yet. `./install.sh` now
-  runs this automatically, so a fresh clone gets both refindmgr *and* rEFInd ready to
-  go in one step.
-- **`refindmgr doctor`** — a one-shot diagnostic to confirm everything is detected
-  correctly before you change anything.
-- Never touches the boot loader/NVRAM directly — it only manages the `themes/` folder
-  and the `include` lines inside `refind.conf`.
-
 ## Installation
 
 Requires `python3` and its `venv` module (bundled with most distros; on Debian/Ubuntu
 install it with `sudo apt-get install -y python3-venv` if it's missing).
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/rizqianandaa/refindmgr
 cd refindmgr
 sudo ./install.sh
 ```
@@ -66,36 +46,6 @@ The easiest way to use refindmgr is the interactive menu:
 
 ```bash
 refindmgr
-```
-
-That opens a menu like this:
-
-```
-========================================================
-  refindmgr -- rEFInd Theme Manager
-========================================================
-  [ok] rEFInd detected: /boot/efi/EFI/refind
-  [ok] 2 themes installed (active: rEFInd-minimal)
-  [ok] Running as root
-========================================================
-
-Themes
-  1) Show installed & active themes
-  2) Browse the theme catalog
-  3) Install a new theme
-  4) Activate a theme
-  5) Deactivate all themes
-  6) Remove a theme
-
-refind.conf backups
-  7) Create a backup now
-  8) Restore from a backup
-
-System
-  9) Diagnostics (doctor)
-  10) Install rEFInd itself (setup)
-
-  0) Quit
 ```
 
 Just type a number and follow the prompts — refindmgr asks for whatever it needs
@@ -169,15 +119,6 @@ script from the rEFInd project itself. refindmgr never writes to the EFI
 partition/NVRAM with its own logic for this step. Other distros: follow the
 [official rEFInd install guide](https://www.rodsbooks.com/refind/installing.html).
 
-## Security & backups
-
-- Never touches `refind_x64.efi`/`refind_ia32.efi`/`refind_aa64.efi` or any other boot
-  loader/NVRAM files directly — the only operation at that level (`setup --yes`) is
-  fully delegated to the official `refind-install` script.
-- Every `refind.conf` change automatically creates a timestamped backup
-  (`refind.conf.<timestamp>.bak`) before writing anything.
-- Theme names are validated as safe folder names (path traversal is always rejected).
-
 ## Troubleshooting
 
 **`sudo ./install.sh` → `Permission denied (os error 13)`.** This means `install.sh`
@@ -206,37 +147,6 @@ only be written by root. Add `sudo` for commands that change something.
 
 **rEFInd folder not detected automatically.** Check your EFI partition's location
 (`lsblk`/`sudo blkid`), then set it manually with `--refind-dir` or `REFIND_DIR`.
-
-## Project structure
-
-```
-refindmgr/
-├── refindmgr/
-│   ├── paths.py     # Detects the rEFInd folder
-│   ├── conf.py      # Safely reads/edits refind.conf + backups
-│   ├── themes.py    # Install/remove/list themes (git, folder, zip) + name validation
-│   ├── catalog.py   # Curated theme catalog
-│   ├── system.py    # Detects & helps install rEFInd itself
-│   └── cli.py       # Command-line interface + interactive menu
-├── tests/           # Unit tests (66 tests)
-├── install.sh       # One-shot install of refindmgr + rEFInd (needs sudo)
-├── uninstall.sh     # Removes refindmgr from the system (needs sudo)
-└── pyproject.toml   # Package metadata & the `refindmgr` command
-```
-
-## Development
-
-```bash
-python3 -m venv env && source env/bin/activate
-pip install -e .
-python3 -m unittest discover -s tests -v   # 66 tests
-```
-
-## Roadmap
-
-1. ~~CLI (`refindmgr`)~~ — done, including the interactive menu, 66 tests passing.
-2. Simple GUI on top of the same underlying logic (`cli.py` gets a GUI layer; the
-   other modules stay unchanged).
 
 ## License
 

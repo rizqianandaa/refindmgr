@@ -14,6 +14,18 @@ from . import themes as themes_mod
 from .paths import detect_refind_dir, refind_conf_path
 
 
+class CLIError(Exception):
+    """Kegagalan yang harus ditampilkan ke pengguna sebagai pesan biasa.
+
+    Dipakai oleh semua fungsi cmd_* alih-alih memanggil sys.exit() langsung, supaya
+    kegagalan validasi/operasi ditangani secara konsisten baik saat dipanggil dari
+    CLI langsung (lihat main()) maupun dari menu interaktif (lihat
+    run_interactive_menu()), tanpa mengandalkan SystemExit -- yang aslinya
+    dimaksudkan untuk menghentikan seluruh proses Python, bukan untuk alur
+    kendali di dalam satu sesi menu yang tetap berjalan.
+    """
+
+
 def _refind_dir_arg(args: argparse.Namespace) -> Optional[str]:
     # NOTE: --refind-dir is defined on both the top-level parser and every
     # subparser (via the shared `common` parent) so it can be placed either
@@ -29,15 +41,13 @@ def _refind_dir_arg(args: argparse.Namespace) -> Optional[str]:
 def _resolve_refind_dir(args: argparse.Namespace) -> Path:
     refind_dir = detect_refind_dir(_refind_dir_arg(args))
     if refind_dir is None:
-        print(
+        raise CLIError(
             "Tidak menemukan folder rEFInd (refind.conf) secara otomatis.\n"
             "Tentukan lokasinya manual dengan --refind-dir, contoh:\n"
             "  refindmgr --refind-dir /boot/efi/EFI/refind list\n"
             "Belum pernah install rEFInd sama sekali? Coba 'refindmgr setup' dulu.\n"
-            "Jalankan 'refindmgr doctor' untuk diagnostik lebih lanjut.",
-            file=sys.stderr,
+            "Jalankan 'refindmgr doctor' untuk diagnostik lebih lanjut."
         )
-        sys.exit(1)
     return refind_dir
 
 
@@ -52,13 +62,21 @@ def _warn_if_not_root() -> None:
         )
 
 
-def cmd_list(args: argparse.Namespace) -> None:
-    refind_dir = _resolve_refind_dir(args)
+def _theme_status(refind_dir: Path) -> tuple:
+    """Baca status tema (terpasang & aktif) sekali dari disk.
+
+    Dipakai bersama oleh cmd_list dan _print_status_banner supaya logika
+    pembacaan refind.conf tidak terduplikasi di dua tempat berbeda.
+    """
     installed = themes_mod.list_installed(refind_dir)
     conf_path = refind_conf_path(refind_dir)
-    active_list = []
-    if conf_path.is_file():
-        active_list = conf_mod.get_active_themes(conf_mod.read_lines(conf_path))
+    active_list = conf_mod.get_active_themes(conf_mod.read_lines(conf_path)) if conf_path.is_file() else []
+    return installed, active_list
+
+
+def cmd_list(args: argparse.Namespace) -> None:
+    refind_dir = _resolve_refind_dir(args)
+    installed, active_list = _theme_status(refind_dir)
     active = active_list[0] if active_list else None
 
     if not installed:
@@ -94,8 +112,7 @@ def cmd_catalog(args: argparse.Namespace) -> None:
 def _activate(refind_dir: Path, theme_name: str) -> None:
     conf_path = refind_conf_path(refind_dir)
     if not conf_path.is_file():
-        print(f"refind.conf tidak ditemukan di {refind_dir}", file=sys.stderr)
-        sys.exit(1)
+        raise CLIError(f"refind.conf tidak ditemukan di {refind_dir}")
     lines = conf_mod.read_lines(conf_path)
     conf_mod.backup(conf_path)
     new_lines = conf_mod.activate_theme(lines, theme_name)
@@ -113,8 +130,7 @@ def cmd_install(args: argparse.Namespace) -> None:
     try:
         installed_name = themes_mod.install_theme(refind_dir, source, name=args.name)
     except themes_mod.ThemeError as exc:
-        print(f"Gagal memasang tema: {exc}", file=sys.stderr)
-        sys.exit(1)
+        raise CLIError(f"Gagal memasang tema: {exc}") from exc
     print(f"Tema '{installed_name}' berhasil dipasang di {refind_dir / 'themes' / installed_name}")
     if args.activate:
         _activate(refind_dir, installed_name)
@@ -128,15 +144,12 @@ def cmd_activate(args: argparse.Namespace) -> None:
     try:
         themes_mod.validate_theme_name(args.name)
     except themes_mod.ThemeError as exc:
-        print(f"Nama tema tidak valid: {exc}", file=sys.stderr)
-        sys.exit(1)
+        raise CLIError(f"Nama tema tidak valid: {exc}") from exc
     installed = themes_mod.list_installed(refind_dir)
     if args.name not in installed:
-        print(
-            f"Tema '{args.name}' belum terpasang. Tema yang tersedia: {', '.join(installed) or '(tidak ada)'}",
-            file=sys.stderr,
+        raise CLIError(
+            f"Tema '{args.name}' belum terpasang. Tema yang tersedia: {', '.join(installed) or '(tidak ada)'}"
         )
-        sys.exit(1)
     _activate(refind_dir, args.name)
 
 
@@ -145,8 +158,7 @@ def cmd_deactivate(args: argparse.Namespace) -> None:
     _warn_if_not_root()
     conf_path = refind_conf_path(refind_dir)
     if not conf_path.is_file():
-        print(f"refind.conf tidak ditemukan di {refind_dir}", file=sys.stderr)
-        sys.exit(1)
+        raise CLIError(f"refind.conf tidak ditemukan di {refind_dir}")
     lines = conf_mod.read_lines(conf_path)
     conf_mod.backup(conf_path)
     new_lines = conf_mod.deactivate_all(lines)
@@ -160,8 +172,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
     try:
         themes_mod.remove_theme(refind_dir, args.name)
     except themes_mod.ThemeError as exc:
-        print(f"Gagal menghapus tema: {exc}", file=sys.stderr)
-        sys.exit(1)
+        raise CLIError(f"Gagal menghapus tema: {exc}") from exc
     print(f"Tema '{args.name}' telah dihapus.")
 
 
@@ -170,8 +181,7 @@ def cmd_backup(args: argparse.Namespace) -> None:
     _warn_if_not_root()
     conf_path = refind_conf_path(refind_dir)
     if not conf_path.is_file():
-        print(f"refind.conf tidak ditemukan di {refind_dir}", file=sys.stderr)
-        sys.exit(1)
+        raise CLIError(f"refind.conf tidak ditemukan di {refind_dir}")
     backup_path = conf_mod.backup(conf_path)
     print(f"Backup dibuat: {backup_path}")
 
@@ -186,8 +196,7 @@ def cmd_restore(args: argparse.Namespace) -> None:
     elif backups:
         backup_path = backups[-1]
     else:
-        print("Tidak ada file backup ditemukan.", file=sys.stderr)
-        sys.exit(1)
+        raise CLIError("Tidak ada file backup ditemukan.")
     conf_mod.restore(conf_path, backup_path)
     print(f"refind.conf dipulihkan dari: {backup_path}")
 
@@ -235,13 +244,11 @@ def cmd_setup(args: argparse.Namespace) -> None:
     if not system_mod.is_refind_install_available():
         manager = system_mod.detect_package_manager()
         if manager is None:
-            print(
+            raise CLIError(
                 "Tidak bisa mendeteksi package manager yang didukung (apt/dnf/pacman/zypper) di sistem ini.\n"
                 "Install rEFInd secara manual sesuai distro kamu, lihat panduan resmi:\n"
-                "  https://www.rodsbooks.com/refind/installing.html",
-                file=sys.stderr,
+                "  https://www.rodsbooks.com/refind/installing.html"
             )
-            sys.exit(1)
         command_str = " ".join(manager.install_command)
         print(f"Paket rEFInd belum terpasang. Perintah yang akan dijalankan:\n  sudo {command_str}\n")
         if not args.yes:
@@ -252,13 +259,11 @@ def cmd_setup(args: argparse.Namespace) -> None:
             )
             return
         if not system_mod.is_root():
-            print("Perintah ini butuh akses root. Jalankan ulang dengan: sudo refindmgr setup --yes", file=sys.stderr)
-            sys.exit(1)
+            raise CLIError("Perintah ini butuh akses root. Jalankan ulang dengan: sudo refindmgr setup --yes")
         try:
             system_mod.install_package(manager)
         except system_mod.BootstrapError as exc:
-            print(f"Gagal memasang paket rEFInd: {exc}", file=sys.stderr)
-            sys.exit(1)
+            raise CLIError(f"Gagal memasang paket rEFInd: {exc}") from exc
         print("Paket rEFInd berhasil dipasang.\n")
 
     print(
@@ -272,13 +277,11 @@ def cmd_setup(args: argparse.Namespace) -> None:
         )
         return
     if not system_mod.is_root():
-        print("Perintah ini butuh akses root. Jalankan ulang dengan: sudo refindmgr setup --yes", file=sys.stderr)
-        sys.exit(1)
+        raise CLIError("Perintah ini butuh akses root. Jalankan ulang dengan: sudo refindmgr setup --yes")
     try:
         output = system_mod.run_refind_install()
     except system_mod.BootstrapError as exc:
-        print(f"Gagal memasang rEFInd: {exc}", file=sys.stderr)
-        sys.exit(1)
+        raise CLIError(f"Gagal memasang rEFInd: {exc}") from exc
     if output.strip():
         print(output.strip())
 
@@ -353,20 +356,32 @@ def _print_status_banner(top_args: argparse.Namespace) -> None:
         print(f"  {_RED}x{_RESET} rEFInd belum terdeteksi di lokasi umum.")
         print(f"    {_DIM}Pakai menu '10) Pasang rEFInd' di bawah, atau set --refind-dir.{_RESET}")
     else:
-        conf_path = refind_conf_path(refind_dir)
-        active = None
-        if conf_path.is_file():
-            active_list = conf_mod.get_active_themes(conf_mod.read_lines(conf_path))
-            active = active_list[0] if active_list else None
-        installed_count = len(themes_mod.list_installed(refind_dir))
+        installed, active_list = _theme_status(refind_dir)
+        active = active_list[0] if active_list else None
         theme_info = f"aktif: {active}" if active else "tidak ada tema aktif"
         print(f"  {_GREEN}v{_RESET} rEFInd terdeteksi: {_DIM}{refind_dir}{_RESET}")
-        print(f"  {_GREEN}v{_RESET} {installed_count} tema terpasang ({theme_info})")
+        print(f"  {_GREEN}v{_RESET} {len(installed)} tema terpasang ({theme_info})")
     if system_mod.is_root():
         print(f"  {_GREEN}v{_RESET} Berjalan sebagai root")
     else:
         print(f"  {_YELLOW}o{_RESET} Bukan root {_DIM}(sudo dibutuhkan untuk aksi yang menulis){_RESET}")
     print(rule)
+
+
+def _require_refind_dir(top_args: argparse.Namespace) -> Optional[Path]:
+    """Pastikan folder rEFInd terdeteksi sebelum menu meminta input apa pun.
+
+    Dicek paling awal di setiap handler menu yang butuh rEFInd sudah terpasang,
+    supaya pengguna tidak diminta mengisi prompt yang toh akan gagal juga kalau
+    foldernya memang belum ada.
+    """
+    refind_dir = detect_refind_dir(_refind_dir_arg(top_args))
+    if refind_dir is None:
+        print(
+            f"{_RED}Folder rEFInd tidak ditemukan.{_RESET} "
+            "Coba menu '10) Pasang rEFInd itu sendiri (setup)' atau jalankan ulang dengan --refind-dir."
+        )
+    return refind_dir
 
 
 def _menu_list(top_args: argparse.Namespace) -> None:
@@ -378,6 +393,8 @@ def _menu_catalog(top_args: argparse.Namespace) -> None:
 
 
 def _menu_install(top_args: argparse.Namespace) -> None:
+    if _require_refind_dir(top_args) is None:
+        return
     print("Sumber tema: key katalog (misal 'minimal'), URL git, folder lokal, atau file .zip.")
     print("Lihat menu '2) Jelajahi katalog tema' dulu kalau belum punya sumber tema.")
     source = _prompt("Sumber tema")
@@ -391,10 +408,11 @@ def _menu_install(top_args: argparse.Namespace) -> None:
 
 
 def _menu_activate(top_args: argparse.Namespace) -> None:
-    refind_dir = detect_refind_dir(_refind_dir_arg(top_args))
-    if refind_dir:
-        installed = themes_mod.list_installed(refind_dir)
-        print("Tema terpasang: " + (", ".join(installed) if installed else "(tidak ada)"))
+    refind_dir = _require_refind_dir(top_args)
+    if refind_dir is None:
+        return
+    installed = themes_mod.list_installed(refind_dir)
+    print("Tema terpasang: " + (", ".join(installed) if installed else "(tidak ada)"))
     name = _prompt("Nama tema yang diaktifkan")
     if not name:
         print("Dibatalkan.")
@@ -403,6 +421,8 @@ def _menu_activate(top_args: argparse.Namespace) -> None:
 
 
 def _menu_deactivate(top_args: argparse.Namespace) -> None:
+    if _require_refind_dir(top_args) is None:
+        return
     if not _confirm("Nonaktifkan semua tema (kembali ke tampilan default rEFInd)?"):
         print("Dibatalkan.")
         return
@@ -410,10 +430,11 @@ def _menu_deactivate(top_args: argparse.Namespace) -> None:
 
 
 def _menu_remove(top_args: argparse.Namespace) -> None:
-    refind_dir = detect_refind_dir(_refind_dir_arg(top_args))
-    if refind_dir:
-        installed = themes_mod.list_installed(refind_dir)
-        print("Tema terpasang: " + (", ".join(installed) if installed else "(tidak ada)"))
+    refind_dir = _require_refind_dir(top_args)
+    if refind_dir is None:
+        return
+    installed = themes_mod.list_installed(refind_dir)
+    print("Tema terpasang: " + (", ".join(installed) if installed else "(tidak ada)"))
     name = _prompt("Nama tema yang dihapus")
     if not name:
         print("Dibatalkan.")
@@ -425,18 +446,30 @@ def _menu_remove(top_args: argparse.Namespace) -> None:
 
 
 def _menu_backup(top_args: argparse.Namespace) -> None:
+    if _require_refind_dir(top_args) is None:
+        return
     cmd_backup(argparse.Namespace(**_carry(top_args)))
 
 
 def _menu_restore(top_args: argparse.Namespace) -> None:
-    refind_dir = detect_refind_dir(_refind_dir_arg(top_args))
-    if refind_dir:
-        backups = conf_mod.list_backups(refind_conf_path(refind_dir))
-        if backups:
-            print("Backup tersedia (terbaru di bawah):")
-            for backup_path in backups:
-                print(f"  - {backup_path}")
-    backup = _prompt("Path backup (kosongkan untuk pakai yang terbaru)") or None
+    refind_dir = _require_refind_dir(top_args)
+    if refind_dir is None:
+        return
+    backups = conf_mod.list_backups(refind_conf_path(refind_dir))
+    if not backups:
+        print("Tidak ada file backup ditemukan.")
+        return
+    print("Backup tersedia (terbaru di paling bawah):")
+    for idx, backup_path in enumerate(backups, start=1):
+        print(f"  {idx}) {backup_path}")
+    choice = _prompt(f"Pilih nomor backup (1-{len(backups)}, kosongkan = paling baru)")
+    if not choice:
+        backup = None
+    elif choice.isdigit() and 1 <= int(choice) <= len(backups):
+        backup = str(backups[int(choice) - 1])
+    else:
+        print(f"{_RED}Input tidak valid: '{choice}'. Masukkan angka 1-{len(backups)} atau kosongkan.{_RESET}")
+        return
     cmd_restore(argparse.Namespace(backup=backup, **_carry(top_args)))
 
 
@@ -480,9 +513,21 @@ _MENU_SECTIONS = [
 _MENU_HANDLERS = {key: handler for _, items in _MENU_SECTIONS for key, _, handler in items}
 
 
+def _clear_screen() -> None:
+    """Bersihkan layar terminal antar-siklus menu agar tidak menumpuk ke bawah.
+
+    Dilewati saat stdout bukan TTY (misal saat dites lewat pipe/CI) supaya output
+    yang ditangkap tetap bersih dan tidak berisi kode escape terminal yang tidak
+    berguna di luar terminal interaktif sungguhan.
+    """
+    if sys.stdout.isatty():
+        os.system("cls" if os.name == "nt" else "clear")
+
+
 def run_interactive_menu(top_args: argparse.Namespace) -> None:
     """Menu CLI interaktif -- dipanggil otomatis saat 'refindmgr' dijalankan tanpa subcommand."""
     while True:
+        _clear_screen()
         print()
         _print_status_banner(top_args)
         print()
@@ -510,10 +555,16 @@ def run_interactive_menu(top_args: argparse.Namespace) -> None:
             continue
         try:
             handler(top_args)
-        except SystemExit:
-            # cmd_* memanggil sys.exit() untuk kegagalan validasi -- tangkap di sini
-            # supaya menu tetap berjalan, bukan menutup seluruh program.
-            pass
+        except CLIError as exc:
+            print(f"{_RED}{exc}{_RESET}", file=sys.stderr)
+        except PermissionError as exc:
+            print(
+                f"{_RED}Akses ditolak: {exc}{_RESET}\n"
+                "Perintah ini butuh akses root karena menyentuh partisi EFI. Coba ulangi dengan sudo.",
+                file=sys.stderr,
+            )
+        except OSError as exc:
+            print(f"{_RED}Terjadi kesalahan sistem: {exc}{_RESET}", file=sys.stderr)
         print()
         try:
             input(f"{_DIM}Tekan Enter untuk kembali ke menu...{_RESET}")
@@ -614,6 +665,9 @@ def main(argv=None) -> None:
             run_interactive_menu(args)
         else:
             args.func(args)
+    except CLIError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
     except PermissionError as exc:
         print(
             f"Akses ditolak: {exc}\n"
