@@ -23,13 +23,10 @@ CATALOG: List[ThemeCatalogEntry] = [
     ThemeCatalogEntry("digital-void", "rEFInd Digital Void", "https://github.com/Wi-Fight-IT/rEFInd-digital-void"),
     ThemeCatalogEntry("minimalistic", "rEFInd Minimalistic", "https://github.com/mehedi-codes/refind-minimalistic", install_name="rEFInd-Minimalistic-Theme"),
     ThemeCatalogEntry("sublime", "rEFInd Sublime", "https://github.com/senpaiSubby/refind-sublime"),
-    ThemeCatalogEntry("catppuccin", "Catppuccin rEFInd", "https://github.com/catppuccin/refind", install_name="catppuccin"),
 ]
 
 
 def find(key: str) -> Optional[ThemeCatalogEntry]:
-    aliases = {"minimal": "minimalistic"}
-    key = aliases.get(key, key)
     for entry in CATALOG:
         if entry.key == key:
             return entry

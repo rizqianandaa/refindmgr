@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from refindmgr import conf as conf_mod
 
@@ -121,21 +122,30 @@ class TestBackupRestore(unittest.TestCase):
             conf_path = Path(tmp) / "refind.conf"
             conf_path.write_text("timeout 5\n")
             b1 = conf_mod.backup(conf_path)
+            conf_path.write_text("timeout 10\n")
             b2 = conf_mod.backup(conf_path)
             backups = conf_mod.list_backups(conf_path)
             self.assertEqual(set(backups), {b1, b2})
 
-    def test_rapid_backups_never_collide(self):
-        # Regression test: backup() used to name files with second-resolution
-        # timestamps only, so calling it multiple times within the same
-        # second silently overwrote the previous backup and lost history.
+    def test_identical_backups_are_coalesced(self):
+        # Repeating an operation without changing refind.conf must not fill the
+        # ESP with byte-identical snapshots.
         with TemporaryDirectory() as tmp:
             conf_path = Path(tmp) / "refind.conf"
             conf_path.write_text("timeout 5\n")
             backup_paths = [conf_mod.backup(conf_path) for _ in range(5)]
-            self.assertEqual(len(backup_paths), len(set(backup_paths)))
-            for path in backup_paths:
-                self.assertTrue(path.is_file())
+            self.assertEqual(len(set(backup_paths)), 1)
+            self.assertEqual(len(conf_mod.list_backups(conf_path)), 1)
+
+    def test_backup_retention_prunes_old_files(self):
+        with TemporaryDirectory() as tmp, patch.dict("os.environ", {"REFINDMGR_BACKUP_LIMIT": "5"}):
+            conf_path = Path(tmp) / "refind.conf"
+            for index in range(9):
+                conf_path.write_text(f"timeout {index}\n")
+                conf_mod.backup(conf_path)
+            backups = conf_mod.list_backups(conf_path)
+            self.assertEqual(len(backups), 5)
+            self.assertEqual(len(list(Path(tmp).glob("refind.conf.*.bak"))), 5)
 
 
 class TestFindGlobalOption(unittest.TestCase):

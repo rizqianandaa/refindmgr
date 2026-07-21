@@ -15,7 +15,6 @@ from . import catalog as catalog_mod
 from . import conf as conf_mod
 from . import system as system_mod
 from . import themes as themes_mod
-from . import sixel as sixel_mod
 from . import __version__
 from .paths import detect_refind_dir, refind_conf_path
 
@@ -119,9 +118,9 @@ def _activate(refind_dir: Path, theme_name: str, include_path: Optional[str] = N
     if not conf_path.is_file():
         raise CLIError(f"refind.conf tidak ditemukan di {refind_dir}")
     lines = conf_mod.read_lines(conf_path)
-    # Also clean up backup piles created by older refindmgr versions, even if
-    # activating this theme turns out to be a no-op.
-    conf_mod.list_backups(conf_path)
+    conf_mod.backup(conf_path)
+    # Rosé Pine is documented by its upstream author as a direct child of
+    # rEFInd (include rose-pine/theme.conf), not as a themes/ child.
     if include_path:
         new_lines = conf_mod.deactivate_all(lines)
         for i, line in enumerate(new_lines):
@@ -135,10 +134,9 @@ def _activate(refind_dir: Path, theme_name: str, include_path: Optional[str] = N
         for i, line in enumerate(new_lines):
             if line.strip().lower() in {"include rose-pine/theme.conf", "include refind-sublime/theme.conf"}:
                 new_lines[i] = "# " + line.strip()
-    if new_lines == lines:
-        print(f"Tema '{theme_name}' sudah aktif. Tidak ada perubahan dan tidak membuat backup baru.")
-        return
-    conf_mod.backup(conf_path)
+    # Hide the small volume/disk overlay shown beside OS icons by rEFInd.
+    if "hideui badges" not in [line.strip() for line in new_lines]:
+        new_lines.append("hideui badges")
     conf_mod.write_lines(conf_path, new_lines)
     print(f"Tema '{theme_name}' sekarang aktif. Backup refind.conf sebelumnya sudah disimpan otomatis.")
 
@@ -150,58 +148,35 @@ def cmd_install(args: argparse.Namespace) -> None:
     catalog_entry = catalog_mod.find(source)
     if catalog_entry:
         source = catalog_entry.git_url
-    requested_variant = getattr(args, "variant", None) or getattr(args, "subdir", None)
-    if catalog_entry and catalog_entry.key == "soho" and not requested_variant:
-        requested_variant = getattr(args, "color_variant", None)
-    install_name = getattr(args, "name", None)
-    if install_name is None and catalog_entry and catalog_entry.install_name:
-        install_name = catalog_entry.install_name
     try:
-        print("Memeriksa struktur tema dan mencari varian...", flush=True)
-        with themes_mod.prepare_theme_source(
-            source,
-            allow_insecure_http=getattr(args, "allow_insecure_http", False),
-        ) as prepared:
-            variants = prepared.variants
-            if requested_variant:
-                # Catalog subdir names and generic variant keys are both accepted.
-                match = next(
-                    (v for v in variants if requested_variant.lower() in {
-                        v.key.lower(), v.label.lower(), v.config_path.lower()
-                    } or requested_variant.lower() in v.config_path.lower()),
-                    None,
-                )
-                if match:
-                    requested_variant = match.key
-            elif len(variants) > 1:
-                print(f"Ditemukan {len(variants)} varian tema:")
-                for index, item in enumerate(variants, start=1):
-                    print(f"  {index}) {item.label} [{item.key}]")
-                if not sys.stdin.isatty():
-                    choices = ", ".join(item.key for item in variants)
-                    raise CLIError(
-                        "Sumber memiliki beberapa varian. Jalankan ulang dengan "
-                        f"--variant <nama>. Pilihan: {choices}"
-                    )
-                choice = input(f"Pilih varian (1-{len(variants)}): ").strip()
-                if not choice.isdigit() or not 1 <= int(choice) <= len(variants):
-                    raise CLIError("Pilihan varian tidak valid; instalasi dibatalkan.")
-                requested_variant = variants[int(choice) - 1].key
-            installed = themes_mod.install_prepared_theme(
-                refind_dir,
-                prepared,
-                name=install_name,
-                variant=requested_variant,
-                allow_unsafe_theme=getattr(args, "allow_unsafe_theme", False),
-            )
+        installed_name = themes_mod.install_theme(refind_dir, source, name=args.name, subdir=getattr(args, "subdir", None))
     except themes_mod.ThemeError as exc:
         raise CLIError(f"Gagal memasang tema: {exc}") from exc
-    installed_name = installed.name
-    print(f"Tema '{installed_name}' varian '{installed.variant}' berhasil dipasang di {installed.path}")
-    for warning in installed.warnings:
-        print(f"PERINGATAN: {warning}")
+    if catalog_entry and catalog_entry.key == "digital-void":
+        themes_mod.patch_digital_void_theme(refind_dir / "themes" / installed_name)
+    is_rose_pine = bool(catalog_entry and catalog_entry.key == "soho")
+    if is_rose_pine:
+        old_theme_dir = refind_dir / "themes" / installed_name
+        rose_dir = refind_dir / "rose-pine"
+        if rose_dir.exists():
+            raise CLIError("Folder rose-pine sudah ada di rEFInd. Hapus folder lama itu sebelum memasang ulang.")
+        shutil.move(str(old_theme_dir), str(rose_dir))
+        installed_name = "rose-pine"
+        themes_mod.patch_rose_pine_theme(rose_dir, getattr(args, "color_variant", "main"))
+    is_sublime = bool(catalog_entry and catalog_entry.key == "sublime")
+    if is_sublime:
+        old_theme_dir = refind_dir / "themes" / installed_name
+        sublime_dir = refind_dir / "refind-sublime"
+        if sublime_dir.exists():
+            raise CLIError("Folder refind-sublime sudah ada di rEFInd. Hapus folder lama itu sebelum memasang ulang.")
+        shutil.move(str(old_theme_dir), str(sublime_dir))
+        installed_name = "refind-sublime"
+        themes_mod.patch_sublime_theme(sublime_dir)
+    theme_location = (refind_dir / installed_name) if (is_rose_pine or is_sublime) else (refind_dir / "themes" / installed_name)
+    print(f"Tema '{installed_name}' berhasil dipasang di {theme_location}")
     if args.activate:
-        _activate(refind_dir, installed_name)
+        special_include = "rose-pine/theme.conf" if is_rose_pine else ("refind-sublime/theme.conf" if is_sublime else None)
+        _activate(refind_dir, installed_name, include_path=special_include)
     else:
         print(f"Jalankan 'refindmgr activate {installed_name}' untuk mengaktifkannya.")
 
@@ -218,8 +193,7 @@ def cmd_activate(args: argparse.Namespace) -> None:
         raise CLIError(
             f"Tema '{args.name}' belum terpasang. Tema yang tersedia: {', '.join(installed) or '(tidak ada)'}"
         )
-    legacy_include = f"{args.name}/theme.conf" if not (refind_dir / "themes" / args.name / "theme.conf").is_file() else None
-    _activate(refind_dir, args.name, include_path=legacy_include)
+    _activate(refind_dir, args.name)
 
 
 def cmd_deactivate(args: argparse.Namespace) -> None:
@@ -229,12 +203,8 @@ def cmd_deactivate(args: argparse.Namespace) -> None:
     if not conf_path.is_file():
         raise CLIError(f"refind.conf tidak ditemukan di {refind_dir}")
     lines = conf_mod.read_lines(conf_path)
-    conf_mod.list_backups(conf_path)
-    new_lines = conf_mod.deactivate_all(lines)
-    if new_lines == lines:
-        print("Tidak ada tema aktif. Tidak ada perubahan dan tidak membuat backup baru.")
-        return
     conf_mod.backup(conf_path)
+    new_lines = conf_mod.deactivate_all(lines)
     conf_mod.write_lines(conf_path, new_lines)
     print("Semua tema dinonaktifkan. rEFInd akan memakai tampilan default saat boot berikutnya.")
 
@@ -247,35 +217,6 @@ def cmd_remove(args: argparse.Namespace) -> None:
     except themes_mod.ThemeError as exc:
         raise CLIError(f"Gagal menghapus tema: {exc}") from exc
     print(f"Tema '{args.name}' telah dihapus.")
-
-
-def cmd_variant(args: argparse.Namespace) -> None:
-    refind_dir = _resolve_refind_dir(args)
-    try:
-        variants = themes_mod.installed_variants(refind_dir, args.name)
-    except themes_mod.ThemeError as exc:
-        raise CLIError(str(exc)) from exc
-    if len(variants) < 2:
-        raise CLIError(f"Tema '{args.name}' tidak memiliki lebih dari satu varian.")
-    print(f"Varian tersedia untuk '{args.name}':")
-    for index, item in enumerate(variants, 1):
-        print(f"  {index}) {item.label} [{item.key}]")
-    requested = getattr(args, "set_variant", None)
-    if not requested:
-        if not sys.stdin.isatty():
-            return
-        choice = input(f"Pilih varian (1-{len(variants)}): ").strip()
-        if not choice.isdigit() or not 1 <= int(choice) <= len(variants):
-            raise CLIError("Pilihan varian tidak valid.")
-        requested = variants[int(choice) - 1].key
-    selected = next((v for v in variants if requested.lower() in {v.key.lower(), v.label.lower()}), None)
-    if selected is None:
-        raise CLIError(f"Varian '{requested}' tidak ditemukan.")
-    try:
-        changed = themes_mod.switch_variant(refind_dir, args.name, selected.key)
-    except themes_mod.ThemeError as exc:
-        raise CLIError(str(exc)) from exc
-    print(f"Varian tema '{args.name}' sekarang: {changed.variant}. Tidak perlu install ulang.")
 
 
 # Preset 'declutter': hanya menyisakan Shutdown & Reboot di baris tools (baris
@@ -660,8 +601,7 @@ def _detect_standard_os_loaders(refind_dir: Path, lines: list) -> list[tuple[str
         "ubuntu": "Ubuntu", "debian": "Debian", "fedora": "Fedora",
         "arch": "Arch Linux", "manjaro": "Manjaro", "opensuse": "openSUSE",
         "linuxmint": "Linux Mint", "pop_os": "Pop!_OS", "zorin": "Zorin OS",
-        "elementary": "elementary OS", "kali": "Kali Linux", "nixos": "NixOS",
-        "endeavouros": "EndeavourOS", "garuda": "Garuda Linux",
+        "elementary": "elementary OS", "kali": "Kali Linux",
     }
     candidates = []
     available = {path.lower(): path for path in system_mod.list_esp_loader_files(refind_dir)}
@@ -669,18 +609,9 @@ def _detect_standard_os_loaders(refind_dir: Path, lines: list) -> list[tuple[str
     if windows in available:
         candidates.append(("Windows", available[windows]))
     for folder, label in known_linux.items():
-        # Prefer shim whenever present: it is the correct entry point for
-        # Secure Boot and still works when Secure Boot is disabled. Fall back
-        # across common x64/AA64/IA32 loader names without assuming one CPU.
-        choices = (
-            f"efi/{folder}/shimx64.efi", f"efi/{folder}/shimaa64.efi",
-            f"efi/{folder}/shimia32.efi", f"efi/{folder}/grubx64.efi",
-            f"efi/{folder}/grubaa64.efi", f"efi/{folder}/grubia32.efi",
-            f"efi/{folder}/systemd-bootx64.efi",
-        )
-        selected = next((available[path] for path in choices if path in available), None)
-        if selected:
-            candidates.append((label, selected))
+        path = f"efi/{folder}/grubx64.efi"
+        if path in available:
+            candidates.append((label, available[path]))
     # Terapkan validasi yang sama seperti input manual. Aturan global lama bisa
     # masih mengecualikan grubx64.efi; kandidat seperti itu tidak boleh dipilih.
     safe = []
@@ -792,13 +723,7 @@ def cmd_restore(args: argparse.Namespace) -> None:
     conf_path = refind_conf_path(refind_dir)
     backups = conf_mod.list_backups(conf_path)
     if args.backup:
-        backup_path = Path(args.backup).expanduser().resolve()
-        known = {path.resolve() for path in backups}
-        if backup_path not in known and not getattr(args, "allow_external_backup", False):
-            raise CLIError(
-                "Path tersebut bukan backup refindmgr yang dikenal. Gunakan backup dari "
-                "daftar, atau tambahkan --allow-external-backup setelah memeriksa isinya."
-            )
+        backup_path = Path(args.backup)
     elif backups:
         backup_path = backups[-1]
     else:
@@ -970,13 +895,7 @@ def _ensure_refind_version_pinned(args: argparse.Namespace, manager: Optional["s
     tetap menghormati flag --yes yang sama seperti langkah setup lain: tanpa
     --yes ini hanya pratinjau, tidak pernah mengubah apa pun.
     """
-    # Namespace callers from the Python API created before v2 did not carry
-    # this field; preserve their old behavior. The real v2 CLI parser always
-    # supplies False unless the user explicitly passes --pin-version.
-    if not getattr(args, "pin_version", True):
-        print("Version pinning dilewati (aktifkan secara eksplisit dengan --pin-version).")
-        return
-    target = getattr(args, "target_version", None) or system_mod.TARGET_REFIND_VERSION
+    target = system_mod.TARGET_REFIND_VERSION
     if manager is None:
         print(
             "Tidak bisa mendeteksi package manager yang didukung, jadi refindmgr melewati "
@@ -1015,7 +934,7 @@ def _ensure_refind_version_pinned(args: argparse.Namespace, manager: Optional["s
     try:
         exact_version = system_mod.pin_refind_version(manager, target=target)
     except system_mod.BootstrapError as exc:
-        if manager.name == "apt" and getattr(args, "allow_direct_download", True):
+        if manager.name == "apt":
             # Banyak repo apt distro (termasuk Ubuntu) hanya menyediakan rilis
             # rEFInd TERBARU, bukan versi lama seperti target di sini -- itu
             # sebabnya pin_refind_version gagal. Jalur cadangan: unduh paket
@@ -1104,10 +1023,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
     if refind_dir is not None:
         print(f"rEFInd sudah terpasang di {refind_dir}. Tidak perlu instalasi ulang.")
         _ensure_refind_version_pinned(args, manager)
-        if getattr(args, "refresh_esp", True):
-            _sync_refind_esp_binary(args)
-        else:
-            print("Binari ESP tidak disentuh. Gunakan --refresh-esp jika memang ingin menjalankan refind-install ulang.")
+        _sync_refind_esp_binary(args)
         return
 
     print("rEFInd belum terdeteksi terpasang di sistem ini.\n")
@@ -1189,16 +1105,6 @@ _YELLOW = _style("\033[33m")
 _CYAN = _style("\033[36m")
 _MAGENTA = _style("\033[35m")
 
-# Exact FIGlet/TAAG "Slant" output for: refindmgr
-_REFINDMGR_ASCII = (
-    "               ____           __",
-    "   _____ ____  / __(_)___  ____/ /___ ___  ____ ______",
-    r"  / ___/ / __ \/ /_/ / __ \/ __  / __ `__ \/ __ `/ ___/",
-    " / /    / /_/ / __/ / / / / /_/ / / / / / / /_/ / /",
-    r"/_/     \____/_/ /_/_/ /_/\__,_/_/ /_/ /_/\__, /_/",
-    "                                         /____/",
-)
-
 
 def _prompt(label: str, default: str = "") -> str:
     suffix = f" [{default}]" if default else ""
@@ -1233,20 +1139,22 @@ def _carry(top_args: argparse.Namespace) -> dict:
 def _print_status_banner(top_args: argparse.Namespace) -> None:
     refind_dir = detect_refind_dir(_refind_dir_arg(top_args))
     rule = f"{_CYAN}{'=' * 56}{_RESET}"
-    for line in _REFINDMGR_ASCII:
-        print(f"{_CYAN}{_BOLD}{line}{_RESET}")
-    print(f"  {_DIM}v{__version__}{_RESET}")
+    print(rule)
+    print(f"  {_BOLD}╭─ refindmgr ─╮{_RESET}")
+    print(f"  {_DIM}rEFInd Theme Manager · v{__version__}{_RESET}")
     print(rule)
     if refind_dir is None:
         print(f"  {_RED}x{_RESET} rEFInd belum terdeteksi di lokasi umum.")
-        print(f"    {_DIM}Pakai menu '13) Pasang rEFInd itu sendiri (setup)' di bawah, atau set --refind-dir.{_RESET}")
+        print(f"    {_DIM}Pakai menu '11) Pasang rEFInd itu sendiri (setup)' di bawah, atau set --refind-dir.{_RESET}")
     else:
         installed, active_list = _theme_status(refind_dir)
         active = active_list[0] if active_list else None
         theme_info = f"aktif: {active}" if active else "tidak ada tema aktif"
         print(f"  {_GREEN}v{_RESET} rEFInd terdeteksi: {_DIM}{refind_dir}{_RESET}")
         print(f"  {_GREEN}v{_RESET} {len(installed)} tema terpasang ({theme_info})")
-    if not system_mod.is_root():
+    if system_mod.is_root():
+        print(f"  {_GREEN}v{_RESET} Berjalan sebagai root")
+    else:
         print(f"  {_YELLOW}o{_RESET} Bukan root {_DIM}(sudo dibutuhkan untuk aksi yang menulis){_RESET}")
     print(rule)
 
@@ -1262,7 +1170,7 @@ def _require_refind_dir(top_args: argparse.Namespace) -> Optional[Path]:
     if refind_dir is None:
         print(
             f"{_RED}Folder rEFInd tidak ditemukan.{_RESET} "
-            "Coba menu '13) Pasang rEFInd itu sendiri (setup)' atau jalankan ulang dengan --refind-dir."
+            "Coba menu '11) Pasang rEFInd itu sendiri (setup)' atau jalankan ulang dengan --refind-dir."
         )
     return refind_dir
 
@@ -1271,45 +1179,13 @@ def _menu_list(top_args: argparse.Namespace) -> None:
     cmd_list(top_args)
 
 
-def _catalog_preview_path(entry) -> Optional[Path]:
-    """Cache one small original preview per catalog entry."""
-    cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "refindmgr" / "catalog"
-    cache.mkdir(parents=True, exist_ok=True)
-    existing = sorted(cache.glob(f"{entry.key}.*"))
-    if existing:
-        return existing[0]
-    try:
-        with themes_mod.prepare_theme_source(entry.git_url) as prepared:
-            image = themes_mod.preview_image(prepared.root, prepared.variants[0])
-            if image is None:
-                return None
-            destination = cache / f"{entry.key}{image.suffix.lower()}"
-            shutil.copy2(image, destination)
-            return destination
-    except (themes_mod.ThemeError, OSError):
-        return None
-
-
 def _menu_install(top_args: argparse.Namespace) -> None:
     if _require_refind_dir(top_args) is None:
         return
-    print("Katalog tema — preview asli ditampilkan kecil di bawah setiap tema:\n")
-    preview_ready, preview_note = sixel_mod.availability()
-    if not preview_ready:
-        print(f"Preview Sixel tidak tersedia: {preview_note}.\n")
+    print("Pilih tema dari katalog (buka URL di sampingnya untuk melihat preview):\n")
     for index, entry in enumerate(catalog_mod.CATALOG, start=1):
-        print(f"  [{index}/{len(catalog_mod.CATALOG)}] {entry.name}  ({entry.key})")
-        if preview_ready:
-            print("      Memuat preview...", flush=True)
-            image = _catalog_preview_path(entry)
-            if image:
-                shown, note = sixel_mod.show(image, width=280)
-                if not shown:
-                    print(f"      Preview gagal: {note}")
-            else:
-                print("      Preview asli tidak ditemukan.")
-        print(f"      {entry.git_url}")
-        print("      " + "─" * 42)
+        print(f"  {index}) {entry.name}")
+        print(f"     {entry.git_url}")
     choice = _prompt(f"Pilih nomor tema (1-{len(catalog_mod.CATALOG)})")
     if not choice.isdigit() or not 1 <= int(choice) <= len(catalog_mod.CATALOG):
         print("Dibatalkan: nomor tema tidak valid.")
@@ -1339,7 +1215,7 @@ def _menu_install(top_args: argparse.Namespace) -> None:
             print("Dibatalkan: nomor warna tidak valid.")
             return
         color_variant = {"1": "main", "2": "moon", "3": "dawn"}[color_choice]
-    ns = argparse.Namespace(source=entry.key, name=(None if subdir else entry.install_name), subdir=subdir, variant=None, color_variant=color_variant, activate=True, **_carry(top_args))
+    ns = argparse.Namespace(source=entry.key, name=(None if subdir else entry.install_name), subdir=subdir, color_variant=color_variant, activate=True, **_carry(top_args))
     _menu_loading("Memasang")
     cmd_install(ns)
 
@@ -1404,30 +1280,6 @@ def _menu_remove(top_args: argparse.Namespace) -> None:
         return
     _menu_loading("Menghapus")
     cmd_remove(argparse.Namespace(name=name, **_carry(top_args)))
-
-
-def _menu_variant(top_args: argparse.Namespace) -> None:
-    refind_dir = _require_refind_dir(top_args)
-    if refind_dir is None:
-        return
-    candidates = []
-    for name in themes_mod.list_installed(refind_dir):
-        try:
-            if len(themes_mod.installed_variants(refind_dir, name)) > 1:
-                candidates.append(name)
-        except themes_mod.ThemeError:
-            pass
-    if not candidates:
-        print("Tidak ada tema terpasang yang memiliki beberapa varian.")
-        return
-    print("Pilih tema:")
-    for index, name in enumerate(candidates, 1):
-        print(f"  {index}) {name}")
-    choice = _prompt(f"Pilih nomor tema (1-{len(candidates)})")
-    if not choice.isdigit() or not 1 <= int(choice) <= len(candidates):
-        print("Dibatalkan: nomor tidak valid.")
-        return
-    cmd_variant(argparse.Namespace(name=candidates[int(choice)-1], set_variant=None, **_carry(top_args)))
 
 
 def _menu_declutter(top_args: argparse.Namespace) -> None:
@@ -1532,10 +1384,7 @@ def _menu_setup(top_args: argparse.Namespace) -> None:
     yes = _confirm("Jalankan instalasi rEFInd sekarang (bukan hanya pratinjau)?")
     if yes:
         _menu_loading("Menyiapkan")
-    cmd_setup(argparse.Namespace(
-        yes=yes, pin_version=False, refresh_esp=False,
-        allow_direct_download=False, target_version=None, **_carry(top_args)
-    ))
+    cmd_setup(argparse.Namespace(yes=yes, **_carry(top_args)))
 
 
 _MENU_SECTIONS = [
@@ -1546,11 +1395,10 @@ _MENU_SECTIONS = [
         ("4", "Aktifkan tema", _menu_activate),
         ("5", "Nonaktifkan semua tema", _menu_deactivate),
         ("6", "Hapus tema", _menu_remove),
-        ("7", "Ganti varian tema", _menu_variant),
     ]),
-    ("Backup refind.conf", [("8", "Buat backup sekarang", _menu_backup), ("9", "Restore dari backup", _menu_restore)]),
-    ("Tampilan boot", [("10", "Hanya tampilkan OS saja", _menu_clean_menu_auto), ("11", "Batalkan mode OS saja", _menu_clean_menu_undo)]),
-    ("Sistem", [("12", "Diagnostik (doctor)", _menu_doctor), ("13", "Pasang rEFInd itu sendiri (setup)", _menu_setup)]),
+    ("Backup refind.conf", [("7", "Buat backup sekarang", _menu_backup), ("8", "Restore dari backup", _menu_restore)]),
+    ("Tampilan boot", [("9", "Hanya tampilkan OS saja", _menu_clean_menu_auto), ("10", "Batalkan mode OS saja", _menu_clean_menu_undo)]),
+    ("Sistem", [("11", "Diagnostik (doctor)", _menu_doctor), ("12", "Pasang rEFInd itu sendiri (setup)", _menu_setup)]),
 ]
 
 _MENU_HANDLERS = {key: handler for _, items in _MENU_SECTIONS for key, _, handler in items}
@@ -1634,7 +1482,6 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="Jalankan 'refindmgr' tanpa argumen untuk membuka menu interaktif.",
         parents=[common],
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=False)
 
     p_list = sub.add_parser("list", help="Tampilkan tema yang terpasang dan yang aktif.", parents=[common])
@@ -1648,12 +1495,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pasang tema dari katalog, URL git, folder lokal, atau file .zip.",
         parents=[common],
     )
-    p_install.add_argument("source", help="Key katalog (misal 'minimalistic') / URL git / path folder / path .zip")
+    p_install.add_argument("source", help="Key katalog (misal 'minimal') / URL git / path folder / path .zip")
     p_install.add_argument("--name", help="Nama folder tujuan (default: ditebak otomatis dari sumbernya).")
-    p_install.add_argument("--variant", help="Key/nama varian. Jika di terminal dan ada beberapa varian, CLI akan menampilkan pilihan.")
     p_install.add_argument("--activate", action="store_true", help="Langsung aktifkan tema setelah dipasang.")
-    p_install.add_argument("--allow-insecure-http", action="store_true", help="Izinkan clone lewat HTTP tanpa TLS (tidak disarankan).")
-    p_install.add_argument("--allow-unsafe-theme", action="store_true", help="Izinkan theme.conf dengan directive boot-sensitive setelah ditinjau manual.")
     p_install.set_defaults(func=cmd_install)
 
     p_activate = sub.add_parser(
@@ -1674,11 +1518,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_remove = sub.add_parser("remove", help="Hapus tema yang terpasang.", parents=[common])
     p_remove.add_argument("name")
     p_remove.set_defaults(func=cmd_remove)
-
-    p_variant = sub.add_parser("variant", help="Ganti varian tema terpasang tanpa install ulang.", parents=[common])
-    p_variant.add_argument("name", help="Nama tema terpasang.")
-    p_variant.add_argument("--set", dest="set_variant", help="Key/nama varian tujuan; tanpa ini daftar varian ditampilkan.")
-    p_variant.set_defaults(func=cmd_variant)
 
     p_declutter = sub.add_parser(
         "declutter",
@@ -1720,7 +1559,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_restore = sub.add_parser("restore", help="Kembalikan refind.conf dari backup.", parents=[common])
     p_restore.add_argument("--backup", help="Path file backup spesifik (default: backup terbaru).")
-    p_restore.add_argument("--allow-external-backup", action="store_true", help="Izinkan file di luar daftar backup refindmgr setelah diperiksa manual.")
     p_restore.set_defaults(func=cmd_restore)
 
     p_doctor = sub.add_parser(
@@ -1740,10 +1578,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Benar-benar jalankan langkah instalasi. Tanpa flag ini hanya pratinjau, tidak ada perubahan.",
     )
-    p_setup.add_argument("--pin-version", action="store_true", help="Sesuaikan versi paket rEFInd secara eksplisit; default-nya tidak mengubah versi.")
-    p_setup.add_argument("--target-version", help=f"Versi target bersama --pin-version (default: {system_mod.TARGET_REFIND_VERSION}).")
-    p_setup.add_argument("--allow-direct-download", action="store_true", help="Izinkan fallback paket resmi langsung bila repo distro tidak punya versi target.")
-    p_setup.add_argument("--refresh-esp", action="store_true", help="Jalankan refind-install ulang pada instalasi yang sudah ada.")
     p_setup.set_defaults(func=cmd_setup)
 
     return parser

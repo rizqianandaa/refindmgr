@@ -172,3 +172,59 @@ class TestPathTraversalProtection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestThemeSourceSafety(unittest.TestCase):
+    def test_zip_with_path_traversal_is_rejected_without_escape(self):
+        with TemporaryDirectory() as tmp:
+            refind_dir = _make_refind_dir(tmp)
+            zip_path = Path(tmp) / "unsafe.zip"
+            outside = Path(tmp) / "escaped.txt"
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("../escaped.txt", "nope")
+                zf.writestr("theme.conf", "selection_big icons/x.png\n")
+            with self.assertRaises(themes_mod.ThemeError):
+                themes_mod.install_theme(refind_dir, str(zip_path))
+            self.assertFalse(outside.exists())
+            self.assertFalse((themes_dir(refind_dir) / "unsafe").exists())
+
+    def test_image_file_is_rejected_with_clear_message(self):
+        with TemporaryDirectory() as tmp:
+            refind_dir = _make_refind_dir(tmp)
+            image = Path(tmp) / "wallpaper.png"
+            image.write_bytes(b"not-a-theme")
+            with self.assertRaisesRegex(themes_mod.ThemeError, "bukan tema rEFInd"):
+                themes_mod.install_theme(refind_dir, str(image))
+
+    def test_local_theme_with_symlink_is_rejected(self):
+        with TemporaryDirectory() as tmp:
+            refind_dir = _make_refind_dir(tmp)
+            theme_src = _make_fake_theme(tmp)
+            target = Path(tmp) / "outside.txt"
+            target.write_text("outside")
+            try:
+                (theme_src / "icons" / "outside-link").symlink_to(target)
+            except OSError:
+                self.skipTest("symbolic links unavailable on this platform")
+            with self.assertRaisesRegex(themes_mod.ThemeError, "symbolic link"):
+                themes_mod.install_theme(refind_dir, str(theme_src))
+
+    def test_git_file_url_clones_valid_theme(self):
+        if not themes_mod.is_git_available():
+            self.skipTest("git unavailable")
+        import subprocess
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "source-repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+            (repo / "theme.conf").write_text("selection_big icons/x.png\n")
+            (repo / "icons").mkdir()
+            (repo / "icons" / "x.png").write_bytes(b"png")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "theme"], check=True, capture_output=True)
+            refind_dir = _make_refind_dir(tmp)
+            installed = themes_mod.install_theme(refind_dir, repo.as_uri(), name="from-git")
+            self.assertEqual(installed, "from-git")
+            self.assertTrue((themes_dir(refind_dir) / "from-git" / "theme.conf").is_file())
+            self.assertFalse((themes_dir(refind_dir) / "from-git" / ".git").exists())

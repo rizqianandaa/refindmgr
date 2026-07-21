@@ -1,0 +1,564 @@
+Metadata-Version: 2.4
+Name: refindmgr
+Version: 1.0.2
+Summary: CLI ringan untuk memasang, mengganti, dan menghapus tema rEFInd tanpa edit manual refind.conf.
+Author: Rizqi Ananda
+License: MIT
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Dynamic: license-file
+
+# refindmgr
+
+**refindmgr** is an open-source CLI for managing [rEFInd](https://www.rodsbooks.com/refind/)
+boot menu themes — install, switch, and remove themes without ever touching the EFI
+partition or hand-editing `refind.conf`.
+
+It now also ships with a friendly **interactive menu** — just run `refindmgr` with no
+arguments and pick what you want from a list, no flags to memorize.
+
+## Features
+
+- **Interactive menu** — run `refindmgr` with no arguments to get a numbered menu with
+  a live status banner (rEFInd detected? which theme is active? running as root?).
+- **Curated theme catalog** — install popular themes with a single short key.
+- **Install themes from anywhere** — git URL, local folder, or a local `.zip` file.
+- **Switch the active theme** in one command, no manual `refind.conf` editing.
+- **Automatic backups** every time `refind.conf` is changed, plus a `restore` command
+  to roll back at any time.
+- **Theme name validation** that blocks path traversal (`../../etc` and similar are
+  always rejected).
+- **`refindmgr setup`** — installs rEFInd itself (via the system package manager plus
+  the official `refind-install` script) if it isn't present yet. `./install.sh` now
+  runs this automatically, so a fresh clone gets both refindmgr *and* rEFInd ready to
+  go in one step.
+- **`refindmgr declutter`** — hides tool icons on the boot screen's tools row
+  (shell, MOK management, memtest, "about", hidden-tags, firmware setup, etc.),
+  leaving only **Shutdown** and **Reboot**. Deliberately does not touch OS
+  detection/scanning at all (see "Tidying up the boot screen" below for why). Fully
+  reversible with `refindmgr declutter --undo` or `restore`.
+- **`refindmgr doctor`** — a one-shot, read-only diagnostic: confirms rEFInd/theme
+  setup, lists every `.efi` loader file it finds on the EFI System Partition (ESP),
+  lists manual `menuentry` stanzas in `refind.conf`, and lists raw kernel files under
+  `/boot` — so if you see a duplicate/missing boot entry, you get a concrete file
+  list to investigate by hand instead of refindmgr guessing a fix for you.
+- Never touches the boot loader/NVRAM directly — it only manages the `themes/` folder
+  and the `include` lines inside `refind.conf`.
+
+## Installation
+
+Requires `python3` and its `venv` module (bundled with most distros; on Debian/Ubuntu
+install it with `sudo apt-get install -y python3-venv` if it's missing).
+
+```bash
+git clone <this-repo>
+cd refindmgr
+sudo ./install.sh
+```
+
+`install.sh` does four things automatically:
+
+1. Creates an isolated Python environment in `/opt/refindmgr` (never touches your
+   system Python/pip).
+2. Installs refindmgr into that environment.
+3. Installs the `refindmgr` command into `/usr/local/bin`, so it can be called from
+   anywhere — including through `sudo` — with no manual `venv`/`pip install` step.
+4. **Installs rEFInd itself** if it isn't already on the system (detects your package
+   manager, installs the `refind` package, then runs the official `refind-install`
+   script). If rEFInd is already installed, this step is a safe no-op. If your distro
+   isn't supported yet, install.sh still finishes successfully and just prints
+   instructions for installing rEFInd manually afterwards.
+
+To uninstall:
+
+```bash
+sudo ./uninstall.sh
+```
+
+(Themes already installed on the EFI partition are left untouched — run
+`refindmgr remove <name>` first if you want a fully clean removal.)
+
+## Quick start
+
+The easiest way to use refindmgr is the interactive menu:
+
+```bash
+refindmgr
+```
+
+That opens a menu like this:
+
+```
+========================================================
+  refindmgr -- rEFInd Theme Manager
+========================================================
+  [ok] rEFInd detected: /boot/efi/EFI/refind
+  [ok] 2 themes installed (active: rEFInd-minimal)
+  [ok] Running as root
+========================================================
+
+Themes
+  1) Show installed & active themes
+  2) Browse the theme catalog
+  3) Install a new theme
+  4) Activate a theme
+  5) Deactivate all themes
+  6) Remove a theme
+
+refind.conf backups
+  7) Create a backup now
+  8) Restore from a backup
+
+Boot screen
+  9) Tidy up the boot screen (OS list + Shutdown + Reboot only)
+  10) Restore default tool icons
+
+System
+  11) Diagnostics (doctor)
+  12) Install rEFInd itself (setup)
+
+  0) Quit
+```
+
+Just type a number and follow the prompts — refindmgr asks for whatever it needs
+(theme source, theme name, confirmations) and shows the same messages as the direct
+commands below.
+
+Prefer scripting or one-off commands instead? All subcommands still work directly:
+
+```bash
+refindmgr doctor                          # confirm rEFInd is detected
+refindmgr catalog                         # browse theme choices
+sudo refindmgr install minimal --activate # install + activate
+```
+
+Reboot to see the new theme in the boot menu.
+
+> Read-only commands (`list`, `catalog`, `doctor`) don't need `sudo`.
+> Commands that write to the EFI partition (`install`, `activate`, `deactivate`,
+> `remove`, `backup`, `restore`, `setup --yes`) need `sudo`.
+
+## All commands
+
+| Command | Needs sudo? | What it does |
+|---|---|---|
+| `refindmgr` (no args) | no | Opens the interactive menu |
+| `refindmgr doctor` | no | Diagnostics: rEFInd folder, git, root access |
+| `refindmgr setup [--yes]` | yes (with `--yes`) | Installs rEFInd itself if missing |
+| `refindmgr catalog` | no | Browse the curated theme catalog |
+| `refindmgr list` | no | Show installed & active themes |
+| `refindmgr install <source> [--activate] [--name NAME]` | yes | Install a theme (catalog/git URL/folder/`.zip`) |
+| `refindmgr activate <name>` | yes | Make `<name>` the active theme |
+| `refindmgr deactivate` | yes | Deactivate all themes (back to default look) |
+| `refindmgr remove <name>` | yes | Remove an installed theme |
+| `refindmgr backup` | yes | Save a copy of the current `refind.conf` |
+| `refindmgr restore [--backup PATH]` | yes | Restore `refind.conf` from a backup |
+| `refindmgr declutter [--undo]` | yes | Hide extra tools, leaving Shutdown + Reboot (`--undo` reverts) |
+| `refindmgr dedupe` | no | Safe preview of duplicate kernel/fallback boot entries; use `--apply` only after review |
+| `refindmgr clean-menu --auto` | no | Auto-detect standard OS loaders and preview an OS-only boot menu |
+
+Every command accepts `--refind-dir /path/to/EFI/refind` (before or after the
+command name) to set the rEFInd folder location manually, or set it once via an
+environment variable:
+
+```bash
+export REFIND_DIR=/boot/efi/EFI/refind
+```
+
+## Tidying up the boot screen (`declutter`)
+
+A very common rEFInd complaint: right after install, the boot screen is full of
+tool icons you'll basically never use (EFI shell, MOK management, memtest, "about",
+hidden-tags recovery, firmware setup, fwupdate, ...) in addition to your actual OS
+entries. `refindmgr declutter` fixes the tools-row half of that, safely:
+
+```bash
+sudo refindmgr declutter          # keep only Shutdown + Reboot on the tools row
+sudo refindmgr declutter --undo   # bring back rEFInd's default tool icons
+```
+
+What it changes in `refind.conf` — **only one option, nothing else**:
+
+- `showtools shutdown,reboot` — only the Shutdown and Reboot icons appear on the
+  tools row; everything else (shell, memtest, gdisk, mok_tool, about, hidden_tags,
+  firmware, fwupdate, ...) is hidden.
+
+`declutter` is now intentionally conservative and does **not** touch `scanfor`,
+`scan_all_linux_kernels`, `dont_scan_files`, or `dont_scan_dirs` at all — see
+"Why declutter doesn't touch OS-scan options anymore" below for why. `--undo` will
+still clean up any of those tokens if an older refindmgr version left them active
+in your `refind.conf`, but the current version never writes them itself.
+
+Like every other write here, it backs up `refind.conf` automatically first, so
+`declutter --undo` or `refindmgr restore` always gets you back to where you started.
+
+### Why `declutter` doesn't touch OS-scan options anymore
+
+An earlier version of this tool also tried to auto-fix the classic "one OS shows up
+2-3 times with different icons" complaint (raw-kernel penguin + generic loader icon
++ your real OS icon) by writing `scan_all_linux_kernels false`, `dont_scan_files
++ grubx64.efi,...`, and (briefly, in one build) `dont_scan_dirs + boot`.
+
+**On real hardware/VMs this repeatedly made the actual OS entry (Ubuntu via
+shim+GRUB) disappear from the boot screen too — twice, independently** — leaving
+only Shutdown/Reboot with no OS entry at all. Whatever the exact rEFInd-version- or
+setup-specific reason, the risk of that happening again isn't acceptable for
+something `declutter` applies automatically without you reviewing each line. So as
+of this version, `declutter` will never again write anything that affects *which
+boot loaders rEFInd scans for or shows* — only the tools row, which cannot possibly
+hide an OS entry.
+
+If you still want to hide the duplicate penguin/generic-icon entries, do it
+manually and incrementally, testing after every single change:
+
+1. Run `sudo refindmgr doctor` first. It runs three read-only checks that tell you
+   exactly what's on your ESP and `/boot`, with zero changes made:
+   - **ESP `.efi` audit** — every `.efi` file it finds on your ESP outside rEFInd's
+     own folder and `EFI/tools`.
+   - **Manual `menuentry` stanza audit** — `menuentry { ... }` blocks written
+     directly in `refind.conf`; these are unaffected by any scan option above.
+   - **`/boot` raw-kernel audit** — lists `vmlinuz*`/`bzImage*`/`kernel*` files and
+     whether `refind_linux.conf` exists there (that file is what makes rEFInd show a
+     raw-kernel entry even with `scan_all_linux_kernels false`).
+2. Pick **one** loader/kernel filename from that output that you're sure is a
+   duplicate, not your only path to an OS.
+3. Add just that one file to `refind.conf` by hand, e.g.
+   `sudo nano /boot/efi/EFI/refind/refind.conf` and add a line like
+   `dont_scan_files + grubx64.efi` (back it up first: `sudo refindmgr backup`).
+4. Reboot and confirm your real OS entry is still there before touching anything
+   else. If it's gone, `sudo refindmgr restore` immediately.
+5. Repeat one file/option at a time, only if step 4 kept working.
+
+This is slower, but it means *you* control and verify each change against your own
+actual hardware/VM, instead of refindmgr guessing from documentation alone.
+
+### Safe duplicate cleanup (`dedupe`)
+
+`dedupe` replaces the old unsafe, global blacklist approach with a **preview-first,
+path-aware** workflow. Running it without flags is read-only: it inventories ESP
+loaders and raw `/boot` kernels, and makes no backup or configuration change.
+
+```bash
+sudo refindmgr dedupe
+```
+
+For the penguin icon, select the OS loader you know must remain visible, then apply
+only the raw-kernel change:
+
+```bash
+sudo refindmgr dedupe --apply --disable-kernels \
+  --keep-loader EFI/ubuntu/grubx64.efi
+```
+
+For a generic box icon caused by the EFI fallback loader, `dedupe` allows hiding it
+only when the fallback is **byte-for-byte identical** to the loader you are keeping:
+
+```bash
+sudo refindmgr dedupe --apply \
+  --keep-loader EFI/ubuntu/grubx64.efi \
+  --hide-fallback EFI/BOOT/BOOTX64.EFI
+```
+
+Every `--apply` run validates that the selected keeper exists and is not already
+excluded by an old `dont_scan_files` rule, creates a backup, and refuses a fallback
+whose file hash differs. It writes only a path-specific rule such as
+`EFI/BOOT/BOOTX64.EFI` — never a global `grubx64.efi`/`shimx64.efi` blacklist.
+If an older refindmgr version left a global rule behind, first run
+`sudo refindmgr declutter --undo`, then re-run the preview.
+
+### OS-only menu (`clean-menu`)
+
+For the cleanest, portable result—**only the OS choices you want, no penguin,
+generic loader, fallback, or stale EFI icons**—use `clean-menu`. Unlike a global
+blacklist, it does not guess whether a filename such as `grubx64.efi` or
+`shimx64.efi` is disposable. You explicitly choose the boot loader for every OS
+that should remain visible; refindmgr creates matching manual `menuentry` stanzas
+and switches rEFInd to `scanfor manual`.
+
+### Recommended: automatic mode
+
+The normal user workflow is one menu action—no path typing required. In the
+interactive CLI, choose:
+
+```text
+9) Hanya tampilkan OS saja
+```
+
+refindmgr scans the ESP and recognizes only safe, standard OS-loader paths:
+Windows (`EFI/Microsoft/Boot/bootmgfw.efi`) and the normal `grubx64.efi` paths for
+Ubuntu, Debian, Fedora, Arch, Manjaro, openSUSE, Linux Mint, Pop!_OS, Zorin,
+elementary OS, and Kali. It deliberately ignores `EFI/BOOT` fallback files,
+`shimx64.efi`, `fbx64.efi`, and `mmx64.efi`; those are exactly the files whose role
+varies by Secure Boot and firmware configuration.
+
+The menu displays every detected OS and asks for one confirmation before applying.
+For scripting, the same flow is available as:
+
+```bash
+sudo refindmgr clean-menu --auto          # read-only preview
+sudo refindmgr clean-menu --auto --apply  # apply after review
+```
+
+### Advanced: manual loader selection
+
+If a device uses a non-standard ESP layout, choose the boot-tested loader manually:
+
+```bash
+sudo refindmgr clean-menu --apply \
+  --os 'Ubuntu=EFI/ubuntu/grubx64.efi'
+```
+
+For more than one OS on the same ESP, repeat `--os` once per verified loader:
+
+```bash
+sudo refindmgr clean-menu --apply \
+  --os 'Ubuntu=EFI/ubuntu/grubx64.efi' \
+  --os 'Windows=EFI/Microsoft/Boot/bootmgfw.efi'
+```
+
+Safety checks before writing:
+
+- Every chosen file must exist on the ESP and end in `.efi`.
+- A selected loader may not be covered by an active old `dont_scan_files` rule.
+- refindmgr refuses to proceed if unrelated active manual entries already exist,
+  because they would defeat the promise of an OS-only menu.
+- A timestamped `refind.conf` backup is always created.
+
+`clean-menu` **does not delete EFI files** and does not write any `dont_scan_files`
+or `dont_scan_dirs` blacklist. To return to the previous `scanfor` mode and remove
+only the menu block created by refindmgr:
+
+```bash
+sudo refindmgr clean-menu --undo
+```
+
+Before publishing or using this on another person's laptop: run the preview first,
+then have them select only loaders they have already boot-tested. This makes the
+feature work across Ubuntu, Fedora, Arch, Windows, single-boot, and multi-boot
+setups without assuming that one generic loader filename has the same role everywhere.
+
+> **If the tools row still looks full after running `declutter`:** the most common real
+> cause is your active *theme* — many decorative rEFInd themes set their own
+> `showtools` line inside their own `theme.conf` (to show off a custom icon for every
+> tool they've drawn art for). Because rEFInd processes `include themes/<name>/theme.conf`
+> inline, that line can override the `showtools` refindmgr wrote to the main
+> `refind.conf`, independent of rEFInd version or line order. `declutter` now detects
+> this automatically: it checks your active theme's own `theme.conf` and comments out
+> any `showtools` line it finds there too (with its own automatic backup, reverted by
+> `declutter --undo`), so nothing is left that can win over the setting above.
+>
+> Separately, rEFInd 0.14.2+ also has a widely-reported, unrelated upstream bug where
+> `showtools` can misbehave even with no theme involved. `refindmgr setup` mitigates
+> that by keeping the installed rEFInd **package** pinned to `0.14.1`; see "Don't have
+> rEFInd yet?" below. If both `declutter` (including the theme-override check above)
+> and version pinning are in place and you still see extra icons, please report it —
+> that would be an actual new bug.
+>
+> `scanfor` is unrelated to any of this: it only controls *where rEFInd looks for
+> other operating systems to boot* (internal/external/optical disks, manual stanzas,
+> etc.) and has no effect on the tools icon row. `declutter` no longer writes
+> `scanfor` at all — if you have an old `scanfor internal,external,optical,manual`
+> line from a previous refindmgr version, it's harmless (that's rEFInd's own default
+> anyway) and you can leave it or remove it by hand.
+
+### Supported theme sources
+
+```bash
+sudo refindmgr install minimal                          # catalog key
+sudo refindmgr install https://github.com/user/repo     # GitHub/git repository
+sudo refindmgr install ./already-downloaded-theme        # local theme folder
+sudo refindmgr install ./theme.zip                       # local theme ZIP
+```
+
+The interactive menu's **2) Jelajahi katalog tema** lists every curated theme with
+a clickable **Preview** link to its GitHub README, where the theme's real screenshot
+is shown. Descriptions were intentionally removed from the terminal list to keep it
+compact and make visual comparison the focus.
+
+A **local folder** means an already-downloaded/extracted *rEFInd theme folder*, not
+a wallpaper or standalone image. It must contain `theme.conf` plus its assets
+(usually `icons/`, backgrounds, fonts, and PNG/SVG files). A lone `.png`, `.jpg`,
+`.jpeg`, `.svg`, or other image cannot be installed as a theme because rEFInd needs
+`theme.conf` to know how to use it. The same rule applies to a ZIP: it must contain
+a complete theme, not just images.
+
+For safety, refindmgr validates `theme.conf`, rejects symbolic links, rejects unsafe
+ZIP paths, removes the cloned repository's `.git` metadata, and cleans up failed
+Git/ZIP installs. It never replaces an existing theme folder automatically.
+
+Find many more theme options (140+) at
+[refind-themes-collection](https://refind-themes-collection.netlify.app/).
+
+## Don't have rEFInd yet?
+
+`sudo ./install.sh` now installs rEFInd for you automatically as its last step, so in
+most cases you don't need to think about this at all. If you skipped that, or want to
+(re)run it manually, `refindmgr setup` can do it on its own:
+
+```bash
+refindmgr setup            # preview: show what would happen, no changes made
+sudo refindmgr setup --yes # actually run the rEFInd installation
+```
+
+Behind the scenes: it detects your system's package manager (apt/dnf/pacman/zypper),
+installs the `refind` package through it, then runs the **official** `refind-install`
+script from the rEFInd project itself. refindmgr never writes to the EFI
+partition/NVRAM with its own logic for this step. Other distros: follow the
+[official rEFInd install guide](https://www.rodsbooks.com/refind/installing.html).
+
+**Version pinning (works around the `showtools` bug above).** Every `setup` run
+(with or without an existing rEFInd install) also checks the installed `refind`
+package version and reconciles it to `0.14.1` — the last version unaffected by the
+0.14.2+ `showtools` bug:
+
+- Not installed yet → installs `0.14.1` directly instead of whatever the distro
+  considers "latest".
+- A newer version is installed → downgrades it to `0.14.1`.
+- An older version is installed → upgrades it to `0.14.1`.
+
+This only ever uses your distro's own package manager (`apt-get install
+--allow-downgrades refind=<version>`, `dnf install refind-<version>`, `zypper
+install --oldpackage refind=<version>`, ...) after confirming the exact version
+string is actually offered by your configured repos — it never guesses or drops in
+an upstream binary outside of that mechanism. If your distro's repo doesn't carry
+`0.14.1` (this isn't guaranteed everywhere, e.g. rolling-release repos that don't
+keep old builds), `setup` prints a clear warning and leaves your install untouched
+rather than silently installing the wrong version — in that case, see the official
+[rEFInd releases page](https://sourceforge.net/projects/refind/files/) for manual
+options. Pacman/Arch is not supported for automatic pinning for the same reason
+(Arch's repos don't retain old package versions).
+
+**Important: the package version alone isn't what boots.** Changing the `refind`
+package version only updates what `dpkg`/`rpm`/`pacman` records as installed — it does
+**not**, by itself, copy a new `refind_x64.efi` onto your EFI System Partition (ESP).
+The file that actually runs at boot only changes when the official `refind-install`
+script is (re)run. Because of this, every `setup` run — including on a system where
+rEFInd is already installed — now also re-runs `refind-install` right after pinning
+the version, so the binary sitting on the ESP is guaranteed to match the package
+version you just pinned. Without this step, a version "downgrade" could report
+success while the boot screen kept behaving exactly like the old (buggy) binary,
+since the ESP file was never actually touched.
+
+**Also important: many distro apt repos only carry the latest rEFInd release.**
+On Ubuntu/Debian, `apt-cache madison refind` frequently lists only the current
+version (e.g. `0.14.2-2.1`), with no older `0.14.1` build available at all -- so a
+plain `apt-get install --allow-downgrades refind=0.14.1` can never succeed no
+matter how many times `setup` is re-run. When this happens, `setup` now
+automatically falls back (apt systems only) to downloading the **official**
+`refind_0.14.1-1_amd64.deb` package directly from rEFInd's own SourceForge
+releases page and installing it with `dpkg -i` (running `apt-get install -f` first
+if dependencies are missing), instead of just printing a warning and leaving the
+system on the buggy version forever. This still only ever installs the exact
+upstream-published `.deb` for the target version -- never a bespoke or unsigned
+binary -- and still requires `--yes` like every other step here.
+
+Like everything else in `setup`, this respects `--yes`: without it, you only get a
+preview of what would change.
+
+## Security & backups
+
+- Never touches `refind_x64.efi`/`refind_ia32.efi`/`refind_aa64.efi` or any other boot
+  loader/NVRAM files directly — the only operation at that level (`setup --yes`) is
+  fully delegated to the official `refind-install` script.
+- Every `refind.conf` change automatically creates a timestamped backup
+  (`refind.conf.<timestamp>.bak`) before writing anything.
+- Theme names are validated as safe folder names (path traversal is always rejected).
+
+## Troubleshooting
+
+**`sudo ./install.sh` → `Permission denied (os error 13)`.** This means `install.sh`
+lost its executable bit — it's a file-permissions problem, not a bug in the script
+itself, so you're not the only one who can hit this. It commonly happens when the repo
+was downloaded as a `.zip` (GitHub's "Download ZIP" button, or any zip/tarball that
+doesn't preserve Unix file permissions) instead of `git clone`. Fix it with either:
+
+```bash
+chmod +x install.sh uninstall.sh
+sudo ./install.sh
+```
+
+or skip the executable bit entirely by invoking it through bash directly:
+
+```bash
+sudo bash install.sh
+```
+
+**`sudo refindmgr ...` → `command not found`.** This usually happens if refindmgr was
+installed manually into a virtualenv (instead of via `install.sh`), whose `PATH` isn't
+carried over to the fresh shell that `sudo` spawns. Fix: `sudo ./install.sh`.
+
+**I extracted/pulled a newer refindmgr, but `refindmgr doctor`/`declutter` still
+behaves exactly like before (no new lines, no new sections).** `refindmgr doctor`
+now always prints its own version as the very first line, e.g.
+`[INFO]    Versi refindmgr yang berjalan sekarang: 0.3.0`. Compare that number
+against this README/the release you just downloaded. If it's older (or that line is
+missing entirely), the files on disk changed but **the installed command didn't** —
+extracting a new zip only updates the files in that folder, it does **not** by itself
+update `/usr/local/bin/refindmgr` or the venv in `/opt/refindmgr`. You must re-run
+the installer every time you deploy new code:
+
+```bash
+sudo ./install.sh
+sudo refindmgr doctor   # confirm the version line now matches
+```
+
+This is the single most common reason a fix "doesn't work" after being applied —
+always confirm the version line first before assuming a fix itself failed.
+
+**`Permission denied` without `sudo`.** This is intentional — the EFI partition can
+only be written by root. Add `sudo` for commands that change something.
+
+**rEFInd folder not detected automatically.** Check your EFI partition's location
+(`lsblk`/`sudo blkid`), then set it manually with `--refind-dir` or `REFIND_DIR`.
+
+**I pulled/extracted a newer refindmgr, ran `sudo ./install.sh` again, but the CLI
+still behaves like the old version (missing menu items, old text, etc).** This was a
+real bug in `install.sh` itself: it installed refindmgr into its private venv with a
+plain `pip install`, and pip treats a local-folder install as "already satisfied" and
+skips copying any files whenever the version number in `pyproject.toml` hasn't changed
+— even though the actual source code did change. `install.sh` now uses
+`pip install --force-reinstall --no-deps`, so it always deploys whatever code is
+currently on disk. If you're on an older `install.sh` that doesn't have this fix yet,
+force it manually:
+
+```bash
+sudo /opt/refindmgr/venv/bin/pip install --force-reinstall --no-deps /path/to/refindmgr
+```
+
+or just delete `/opt/refindmgr` and run `sudo ./install.sh` fresh.
+
+## Project structure
+
+```
+refindmgr/
+├── refindmgr/
+│   ├── paths.py     # Detects the rEFInd folder
+│   ├── conf.py      # Safely reads/edits refind.conf + backups
+│   ├── themes.py    # Install/remove/list themes (git, folder, zip) + name validation
+│   ├── catalog.py   # Curated theme catalog
+│   ├── system.py    # Detects & helps install rEFInd itself + ESP loader audit
+│   └── cli.py       # Command-line interface + interactive menu
+├── tests/           # Unit tests (118 tests)
+├── install.sh       # One-shot install of refindmgr + rEFInd (needs sudo)
+├── uninstall.sh     # Removes refindmgr from the system (needs sudo)
+└── pyproject.toml   # Package metadata & the `refindmgr` command
+```
+
+## Development
+
+```bash
+python3 -m venv env && source env/bin/activate
+pip install -e .
+python3 -m unittest discover -s tests -v   # 118 tests
+```
+
+## Roadmap
+
+1. ~~CLI (`refindmgr`)~~ — done, including the interactive menu, 118 tests passing.
+2. Simple GUI on top of the same underlying logic (`cli.py` gets a GUI layer; the
+   other modules stay unchanged).
+
+## License
+
+MIT License — see [`LICENSE`](LICENSE).

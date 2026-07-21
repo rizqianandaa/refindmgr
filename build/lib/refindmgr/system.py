@@ -196,8 +196,150 @@ def pin_refind_version(
     return exact_version
 
 
+REFIND_DEB_URL_TEMPLATE = 'https://sourceforge.net/projects/refind/files/{version}/refind_{version}-1_amd64.deb/download'
+
+
+def download_refind_deb(
+    version: str,
+    dest_path: str,
+    run_fn: Callable[..., "subprocess.CompletedProcess"] = subprocess.run,
+) -> str:
+    """Unduh paket .deb resmi rEFInd untuk `version` langsung dari SourceForge,
+    melewati repo apt distro.
+
+    Ini penting karena repo apt banyak distro (termasuk Ubuntu) sering HANYA
+    menyediakan rilis rEFInd terbaru, bukan versi lama seperti 0.14.1 yang
+    dibutuhkan untuk menghindari bug upstream 'showtools' di 0.14.2+. Kalau
+    pin_refind_version() gagal karena repo tidak punya versi target, ini jalur
+    cadangan yang dipakai _ensure_refind_version_pinned di cli.py, memakai
+    paket .deb resmi yang dirilis proyek rEFInd sendiri di SourceForge (bukan
+    binari pihak ketiga).
+    """
+    url = REFIND_DEB_URL_TEMPLATE.format(version=version)
+    result = run_fn(["curl", "-fsSL", "-o", dest_path, url], capture_output=True, text=True)
+    if result.returncode != 0 or not os.path.exists(dest_path) or os.path.getsize(dest_path) == 0:
+        raise BootstrapError(
+            f"Gagal mengunduh paket rEFInd {version} dari SourceForge ({url}): "
+            f"{(result.stderr or '').strip() or (result.stdout or '').strip() or 'file kosong/tidak ditemukan'}"
+        )
+    return dest_path
+
+
+def install_deb_file(
+    path: str,
+    run_fn: Callable[..., "subprocess.CompletedProcess"] = subprocess.run,
+) -> str:
+    """Pasang file .deb rEFInd yang sudah diunduh langsung lewat dpkg.
+
+    Kalau dpkg gagal karena dependency yang belum terpasang, otomatis coba
+    'apt-get install -f' sekali lalu ulangi dpkg -- pola standar Debian/Ubuntu
+    untuk memasang .deb lokal.
+    """
+    result = run_fn(["dpkg", "-i", path], capture_output=True, text=True)
+    if result.returncode == 0:
+        return result.stdout or ""
+    run_fn(["apt-get", "install", "-f", "-y"], capture_output=True, text=True)
+    retry = run_fn(["dpkg", "-i", path], capture_output=True, text=True)
+    if retry.returncode != 0:
+        raise BootstrapError(
+            "Gagal memasang paket .deb rEFInd: "
+            f"{(retry.stderr or '').strip() or (result.stderr or '').strip() or (result.stdout or '').strip()}"
+        )
+    return retry.stdout or ""
+
+
 def is_root() -> bool:
     return os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def esp_root_from_refind_dir(refind_dir) -> Optional["__import__('pathlib').Path"]:
+    """Tebak root ESP dari lokasi folder rEFInd, misal '.../EFI/refind' -> '...'.
+
+    Dipakai oleh audit loader ('doctor') untuk tahu dari mana harus mulai
+    menjelajah file *.efi lain di ESP yang sama. Mengembalikan None kalau
+    struktur foldernya tidak seperti yang diharapkan (bukan '.../EFI/<nama>'),
+    supaya pemanggilnya bisa melewati audit ini dengan aman daripada menebak
+    lokasi yang salah.
+    """
+    from pathlib import Path
+
+    refind_dir = Path(refind_dir)
+    efi_dir = refind_dir.parent
+    if efi_dir.name.upper() != "EFI":
+        return None
+    return efi_dir.parent
+
+
+def list_esp_loader_files(refind_dir) -> List[str]:
+    """Jelajahi seluruh ESP (dari folder EFI di atas refind_dir) untuk semua
+    file '*.efi', kecuali yang ada di dalam folder rEFInd sendiri dan
+    'EFI/tools' -- dua folder yang menurut dokumentasi resmi rEFInd memang
+    TIDAK PERNAH dipindai untuk entri OS (jadi tidak relevan untuk audit ini).
+
+    Mengembalikan path relatif terhadap root ESP (memakai '/' di semua OS),
+    diurutkan, supaya mudah dibaca dan dibandingkan dengan 'dont_scan_files'.
+    Mengembalikan list kosong (bukan error) kalau root ESP tidak bisa ditebak
+    atau tidak bisa dibaca -- audit ini bersifat best-effort/informational.
+    """
+    from pathlib import Path
+
+    esp_root = esp_root_from_refind_dir(refind_dir)
+    if esp_root is None or not esp_root.is_dir():
+        return []
+    refind_dir = Path(refind_dir).resolve()
+    tools_dir = (esp_root / "EFI" / "tools").resolve()
+    results = []
+    try:
+        for path in esp_root.rglob("*"):
+            if not path.is_file() or path.suffix.lower() != ".efi":
+                continue
+            resolved = path.resolve()
+            if resolved == refind_dir or refind_dir in resolved.parents:
+                continue
+            if resolved == tools_dir or tools_dir in resolved.parents:
+                continue
+            results.append(path.relative_to(esp_root).as_posix())
+    except OSError:
+        return []
+    return sorted(results)
+
+
+def find_boot_kernel_files(boot_dir: str = "/boot") -> List[str]:
+    """Cari file kernel Linux mentah (vmlinuz*/bzImage*/kernel*) dan
+    'refind_linux.conf' di direktori /boot pada sistem yang sedang berjalan.
+
+    Kenapa ini perlu, terpisah dari audit ESP: dokumentasi resmi rEFInd
+    menyebutkan bahwa proses scan juga menjelajahi direktori 'boot' di setiap
+    filesystem yang bisa diakses -- bukan cuma ESP. Di banyak instalasi
+    Debian/Ubuntu, /boot ada di partisi/filesystem Linux (ext4) yang BERBEDA
+    dari ESP (FAT), jadi tidak ikut ter-audit oleh list_esp_loader_files().
+    Selain itu, dokumentasi juga menyebutkan bahwa 'scan_all_linux_kernels
+    false' TETAP menampilkan sebuah kernel jika ada file 'refind_linux.conf'
+    yang menyertainya -- karena itu dianggap sebagai tanda niat eksplisit agar
+    rEFInd menangani kernel itu secara langsung. Jadi ikon penguin/Tux yang
+    masih muncul walau 'scan_all_linux_kernels false' sudah diset kemungkinan
+    besar berasal dari sini, bukan dari bug pada opsi itu sendiri.
+
+    Mengembalikan list kosong (bukan error) kalau /boot tidak ada atau tidak
+    bisa dibaca -- fungsi ini bersifat best-effort/informational.
+    """
+    from pathlib import Path
+
+    root = Path(boot_dir)
+    if not root.is_dir():
+        return []
+    prefixes = ("vmlinuz", "bzimage", "kernel")
+    results = []
+    try:
+        for path in root.iterdir():
+            if not path.is_file():
+                continue
+            lname = path.name.lower()
+            if lname == "refind_linux.conf" or lname.startswith(prefixes):
+                results.append(path.name)
+    except OSError:
+        return []
+    return sorted(results)
 
 
 def is_refind_install_available(

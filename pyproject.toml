@@ -1,6 +1,6 @@
 [project]
 name = "refindmgr"
-version = "0.4.0"
+version = "2.1.1"
 description = "CLI ringan untuk memasang, mengganti, dan menghapus tema rEFInd tanpa edit manual refind.conf."
 readme = "README.md"
 requires-python = ">=3.9"

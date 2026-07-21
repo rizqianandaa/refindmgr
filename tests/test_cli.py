@@ -25,6 +25,17 @@ def run_cli(args, cwd):
 
 
 class TestCliSmoke(unittest.TestCase):
+    def test_ascii_header_matches_taag_slant(self):
+        expected = (
+            "               ____           __",
+            "   _____ ____  / __(_)___  ____/ /___ ___  ____ ______",
+            r"  / ___/ / __ \/ /_/ / __ \/ __  / __ `__ \/ __ `/ ___/",
+            " / /    / /_/ / __/ / / / / /_/ / / / / / / /_/ / /",
+            r"/_/     \____/_/ /_/_/ /_/\__,_/_/ /_/ /_/\__, /_/",
+            "                                         /____/",
+        )
+        self.assertEqual(cli_mod._REFINDMGR_ASCII, expected)
+
     def test_help_runs_successfully(self):
         result = run_cli(["--help"], cwd=str(Path(__file__).resolve().parent.parent))
         self.assertEqual(result.returncode, 0)
@@ -33,7 +44,7 @@ class TestCliSmoke(unittest.TestCase):
     def test_catalog_lists_entries(self):
         result = run_cli(["catalog"], cwd=str(Path(__file__).resolve().parent.parent))
         self.assertEqual(result.returncode, 0)
-        self.assertIn("minimal", result.stdout)
+        self.assertIn("digital-void", result.stdout)
         self.assertIn("github.com", result.stdout)
 
     def test_list_without_refind_dir_fails_gracefully(self):
@@ -87,6 +98,8 @@ class TestCliSmoke(unittest.TestCase):
             theme_src = Path(tmp) / "my-theme"
             theme_src.mkdir()
             (theme_src / "theme.conf").write_text("selection_big icons/x.png\n")
+            (theme_src / "icons").mkdir()
+            (theme_src / "icons" / "x.png").write_bytes(b"\x89PNG\r\n")
 
             install_result = run_cli(
                 ["--refind-dir", str(refind_dir), "install", str(theme_src), "--activate"],
@@ -95,6 +108,14 @@ class TestCliSmoke(unittest.TestCase):
             self.assertEqual(install_result.returncode, 0, install_result.stderr)
             self.assertIn("berhasil dipasang", install_result.stdout)
             self.assertIn("sekarang aktif", install_result.stdout)
+
+            backup_count = len(list(refind_dir.glob("refind.conf.*.bak")))
+            activate_again = run_cli(
+                ["--refind-dir", str(refind_dir), "activate", "my-theme"], cwd=root
+            )
+            self.assertEqual(activate_again.returncode, 0, activate_again.stderr)
+            self.assertIn("tidak membuat backup baru", activate_again.stdout)
+            self.assertEqual(len(list(refind_dir.glob("refind.conf.*.bak"))), backup_count)
 
             list_result = run_cli(["--refind-dir", str(refind_dir), "list"], cwd=root)
             self.assertEqual(list_result.returncode, 0)
@@ -253,7 +274,7 @@ class TestCliSmoke(unittest.TestCase):
             timeout=10,
         )
         self.assertEqual(result.returncode, 0)
-        self.assertIn("refindmgr", result.stdout)
+        self.assertIn("v2.", result.stdout)
         self.assertIn("Sampai jumpa", result.stdout)
 
     def test_interactive_menu_quit_option_exits_cleanly(self):
@@ -465,3 +486,187 @@ class TestAptDebFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestDedupeSafety(unittest.TestCase):
+    def _make_esp(self, tmp: str):
+        esp = Path(tmp) / "esp"
+        refind_dir = esp / "EFI" / "refind"
+        ubuntu_dir = esp / "EFI" / "ubuntu"
+        boot_dir = esp / "EFI" / "BOOT"
+        refind_dir.mkdir(parents=True)
+        ubuntu_dir.mkdir(parents=True)
+        boot_dir.mkdir(parents=True)
+        (refind_dir / "refind.conf").write_text("timeout 5\n")
+        (ubuntu_dir / "grubx64.efi").write_bytes(b"ubuntu-loader")
+        (boot_dir / "BOOTX64.EFI").write_bytes(b"ubuntu-loader")
+        return refind_dir
+
+    def test_dedupe_preview_never_writes(self):
+        root = str(Path(__file__).resolve().parent.parent)
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_esp(tmp)
+            before = (refind_dir / "refind.conf").read_text()
+            result = run_cli(["--refind-dir", str(refind_dir), "dedupe"], cwd=root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("TIDAK ADA FILE DIUBAH", result.stdout)
+            self.assertEqual((refind_dir / "refind.conf").read_text(), before)
+            self.assertEqual(list(refind_dir.glob("refind.conf.*.bak")), [])
+
+    def test_dedupe_can_disable_kernels_and_hide_identical_fallback(self):
+        root = str(Path(__file__).resolve().parent.parent)
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_esp(tmp)
+            result = run_cli([
+                "--refind-dir", str(refind_dir), "dedupe", "--apply",
+                "--keep-loader", "EFI/ubuntu/grubx64.efi", "--disable-kernels",
+                "--hide-fallback", "EFI/BOOT/BOOTX64.EFI",
+            ], cwd=root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            conf = (refind_dir / "refind.conf").read_text()
+            self.assertIn("scan_all_linux_kernels false", conf)
+            self.assertIn("dont_scan_files + EFI/BOOT/BOOTX64.EFI", conf)
+            self.assertIn("Loader OS yang dipertahankan: EFI/ubuntu/grubx64.efi", result.stdout)
+            self.assertEqual(len(list(refind_dir.glob("refind.conf.*.bak"))), 1)
+
+    def test_dedupe_refuses_loader_covered_by_legacy_global_rule(self):
+        root = str(Path(__file__).resolve().parent.parent)
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_esp(tmp)
+            (refind_dir / "refind.conf").write_text("dont_scan_files + grubx64.efi\n")
+            result = run_cli([
+                "--refind-dir", str(refind_dir), "dedupe", "--apply",
+                "--keep-loader", "EFI/ubuntu/grubx64.efi", "--disable-kernels",
+            ], cwd=root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("masih tercakup", result.stderr)
+            self.assertEqual((refind_dir / "refind.conf").read_text(), "dont_scan_files + grubx64.efi\n")
+
+    def test_dedupe_refuses_nonidentical_fallback(self):
+        root = str(Path(__file__).resolve().parent.parent)
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_esp(tmp)
+            (refind_dir.parent / "BOOT" / "BOOTX64.EFI").write_bytes(b"different-loader")
+            result = run_cli([
+                "--refind-dir", str(refind_dir), "dedupe", "--apply",
+                "--keep-loader", "EFI/ubuntu/grubx64.efi",
+                "--hide-fallback", "EFI/BOOT/BOOTX64.EFI",
+            ], cwd=root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("TIDAK byte-identik", result.stderr)
+
+class TestCleanMenuSafety(unittest.TestCase):
+    def _make_esp(self, tmp: str):
+        esp = Path(tmp) / "esp"
+        refind_dir = esp / "EFI" / "refind"
+        ubuntu_dir = esp / "EFI" / "ubuntu"
+        refind_dir.mkdir(parents=True)
+        ubuntu_dir.mkdir(parents=True)
+        (refind_dir / "refind.conf").write_text("timeout 5\n")
+        (ubuntu_dir / "grubx64.efi").write_bytes(b"ubuntu-loader")
+        return refind_dir
+
+    def test_clean_menu_preview_is_read_only(self):
+        root = str(Path(__file__).resolve().parent.parent)
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_esp(tmp)
+            result = run_cli([
+                "--refind-dir", str(refind_dir), "clean-menu",
+                "--os", "Ubuntu=EFI/ubuntu/grubx64.efi",
+            ], cwd=root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("TIDAK ADA FILE DIUBAH", result.stdout)
+            self.assertNotIn("scanfor manual", (refind_dir / "refind.conf").read_text())
+
+    def test_clean_menu_apply_and_undo_restore_scanfor(self):
+        root = str(Path(__file__).resolve().parent.parent)
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_esp(tmp)
+            (refind_dir / "refind.conf").write_text("scanfor internal,external\n")
+            apply_result = run_cli([
+                "--refind-dir", str(refind_dir), "clean-menu", "--apply",
+                "--os", "Ubuntu=EFI/ubuntu/grubx64.efi",
+            ], cwd=root)
+            self.assertEqual(apply_result.returncode, 0, apply_result.stderr)
+            applied = (refind_dir / "refind.conf").read_text()
+            self.assertIn("scanfor manual", applied)
+            self.assertIn('menuentry "Ubuntu" {', applied)
+            self.assertIn("loader /EFI/ubuntu/grubx64.efi", applied)
+            self.assertIn("refindmgr-clean-menu: previous-scanfor=internal,external", applied)
+
+            undo_result = run_cli(["--refind-dir", str(refind_dir), "clean-menu", "--undo"], cwd=root)
+            self.assertEqual(undo_result.returncode, 0, undo_result.stderr)
+            restored = (refind_dir / "refind.conf").read_text()
+            self.assertIn("scanfor internal,external", restored)
+            self.assertNotIn("refindmgr-clean-menu", restored)
+            self.assertNotIn('menuentry "Ubuntu"', restored)
+
+    def test_clean_menu_rejects_legacy_global_exclusion(self):
+        root = str(Path(__file__).resolve().parent.parent)
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_esp(tmp)
+            (refind_dir / "refind.conf").write_text("dont_scan_files + grubx64.efi\n")
+            result = run_cli([
+                "--refind-dir", str(refind_dir), "clean-menu", "--apply",
+                "--os", "Ubuntu=EFI/ubuntu/grubx64.efi",
+            ], cwd=root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("masih tercakup", result.stderr)
+
+class TestAutoCleanMenu(unittest.TestCase):
+    def _make_esp(self, tmp: str):
+        esp = Path(tmp) / "esp"
+        refind_dir = esp / "EFI" / "refind"
+        ubuntu_dir = esp / "EFI" / "ubuntu"
+        boot_dir = esp / "EFI" / "BOOT"
+        refind_dir.mkdir(parents=True)
+        ubuntu_dir.mkdir(parents=True)
+        boot_dir.mkdir(parents=True)
+        (refind_dir / "refind.conf").write_text("timeout 5\n")
+        (ubuntu_dir / "grubx64.efi").write_bytes(b"ubuntu")
+        (ubuntu_dir / "shimx64.efi").write_bytes(b"shim")
+        (boot_dir / "BOOTX64.EFI").write_bytes(b"fallback")
+        (boot_dir / "fbx64.efi").write_bytes(b"fallback-helper")
+        return refind_dir
+
+    def test_clean_menu_auto_preview_detects_standard_os_only(self):
+        root = str(Path(__file__).resolve().parent.parent)
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_esp(tmp)
+            result = run_cli(["--refind-dir", str(refind_dir), "clean-menu", "--auto"], cwd=root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Ubuntu: /EFI/ubuntu/shimx64.efi", result.stdout)
+            self.assertNotIn("BOOTX64", result.stdout)
+            self.assertNotIn("fbx64", result.stdout)
+            self.assertNotIn("fbx64", result.stdout)
+            self.assertNotIn("scanfor manual", (refind_dir / "refind.conf").read_text())
+
+    def test_clean_menu_auto_apply_writes_only_detected_os(self):
+        root = str(Path(__file__).resolve().parent.parent)
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_esp(tmp)
+            result = run_cli(["--refind-dir", str(refind_dir), "clean-menu", "--auto", "--apply"], cwd=root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            conf = (refind_dir / "refind.conf").read_text()
+            self.assertIn("scanfor manual", conf)
+            self.assertIn('menuentry "Ubuntu" {', conf)
+            self.assertIn("loader /EFI/ubuntu/shimx64.efi", conf)
+            self.assertNotIn("BOOTX64", conf)
+            self.assertNotIn("fbx64", conf)
+
+    def test_interactive_menu_auto_option_applies_after_confirmation(self):
+        root = str(Path(__file__).resolve().parent.parent)
+        with TemporaryDirectory() as tmp:
+            refind_dir = self._make_esp(tmp)
+            result = subprocess.run(
+                [sys.executable, "-m", "refindmgr.cli", "--refind-dir", str(refind_dir)],
+                cwd=root,
+                input="10\ny\n\n0\n",
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("OS ditemukan", result.stdout)
+            self.assertIn("Berhasil menerapkan mode OS saja", result.stdout)
+            conf = (refind_dir / "refind.conf").read_text()
+            self.assertIn("scanfor manual", conf)
+            self.assertIn('menuentry "Ubuntu" {', conf)

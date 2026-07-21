@@ -1,0 +1,2 @@
+[console_scripts]
+refindmgr = refindmgr.cli:main

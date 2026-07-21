@@ -1,11 +1,15 @@
 """Baca/ubah refind.conf dengan aman: backup otomatis, edit baris 'include themes/...'."""
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+
+DEFAULT_BACKUP_LIMIT = 5
 
 # Mencocokkan baris seperti:
 #   include themes/rEFInd-minimal/theme.conf
@@ -21,10 +25,33 @@ def read_lines(conf_path: Path) -> List[str]:
 
 
 def write_lines(conf_path: Path, lines: List[str]) -> None:
+    """Atomically replace a config file on the same filesystem.
+
+    A power loss can no longer leave ``refind.conf`` half-written: data is
+    flushed to a temporary sibling and then committed with ``os.replace``.
+    """
     content = "\n".join(lines)
     if not content.endswith("\n"):
         content += "\n"
-    conf_path.write_text(content, encoding="utf-8")
+    temp = conf_path.with_name(f".{conf_path.name}.refindmgr-{os.getpid()}.tmp")
+    try:
+        with temp.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if conf_path.exists():
+            os.chmod(temp, conf_path.stat().st_mode)
+        os.replace(temp, conf_path)
+        try:
+            directory_fd = os.open(conf_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def backup(conf_path: Path) -> Path:
@@ -33,6 +60,13 @@ def backup(conf_path: Path) -> Path:
     Nama file dijamin unik (menambah sufiks angka jika perlu) supaya dua backup
     yang dibuat dalam detik yang sama tidak saling menimpa satu sama lain.
     """
+    # Do not create another snapshot when the newest backup already contains
+    # exactly the current config. This prevents repeated activate/no-op actions
+    # from producing identical files.
+    backups = list_backups(conf_path)
+    if backups and _files_equal(conf_path, backups[-1]):
+        return backups[-1]
+
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     candidate = conf_path.with_name(f"{conf_path.name}.{timestamp}.bak")
     suffix = 1
@@ -40,6 +74,7 @@ def backup(conf_path: Path) -> Path:
         candidate = conf_path.with_name(f"{conf_path.name}.{timestamp}-{suffix}.bak")
         suffix += 1
     shutil.copy2(conf_path, candidate)
+    _prune_backups(conf_path)
     return candidate
 
 
@@ -48,8 +83,49 @@ def restore(conf_path: Path, backup_path: Path) -> None:
 
 
 def list_backups(conf_path: Path) -> List[Path]:
+    """Return retained backups and prune old ESP snapshots immediately."""
+    return _prune_backups(conf_path)
+
+
+def _backup_limit() -> int:
+    try:
+        return max(1, int(os.environ.get("REFINDMGR_BACKUP_LIMIT", str(DEFAULT_BACKUP_LIMIT))))
+    except ValueError:
+        return DEFAULT_BACKUP_LIMIT
+
+
+def _all_backups(conf_path: Path) -> List[Path]:
     pattern = f"{conf_path.name}.*.bak"
     return sorted(conf_path.parent.glob(pattern))
+
+
+def _prune_backups(conf_path: Path) -> List[Path]:
+    backups = _all_backups(conf_path)
+    keep = _backup_limit()
+    for old in backups[:-keep]:
+        try:
+            old.unlink()
+        except OSError:
+            # Keep unreadable/undeletable entries visible instead of pretending
+            # they were removed successfully.
+            pass
+    return _all_backups(conf_path)[-keep:]
+
+
+def _files_equal(first: Path, second: Path) -> bool:
+    try:
+        if first.stat().st_size != second.stat().st_size:
+            return False
+        with first.open("rb") as left, second.open("rb") as right:
+            while True:
+                a = left.read(1024 * 1024)
+                b = right.read(1024 * 1024)
+                if a != b:
+                    return False
+                if not a:
+                    return True
+    except OSError:
+        return False
 
 
 def find_theme_includes(lines: List[str]) -> List[Tuple[int, str, bool]]:
@@ -172,7 +248,7 @@ def remove_theme_includes(lines: List[str], theme_name: str) -> List[str]:
         for line in lines
         if not (
             (match := INCLUDE_RE.match(line.strip())) is not None
-            and match.group("name") == theme_name
+            and match.group("name").casefold() == theme_name.casefold()
         )
     ]
 

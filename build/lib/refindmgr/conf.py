@@ -76,6 +76,66 @@ def get_active_theme(lines: List[str]) -> Optional[str]:
     return active[0] if active else None
 
 
+def find_manual_stanzas(lines: List[str]) -> List[dict]:
+    """Cari semua blok 'menuentry { ... }' (stanza boot manual) di refind.conf.
+
+    Penting: dont_scan_files/dont_scan_dirs/scan_all_linux_kernels/scanfor HANYA
+    mengatur proses AUTO-SCAN rEFInd -- semuanya TIDAK BERPENGARUH SAMA SEKALI
+    ke stanza 'menuentry' manual yang ditulis langsung di refind.conf. Banyak
+    refind.conf-sample (termasuk yang dipasang otomatis oleh refind-install di
+    Debian/Ubuntu) menyertakan contoh blok seperti:
+        menuentry "Ubuntu" {
+            loader /EFI/ubuntu/grubx64.efi
+            disabled
+        }
+    yang normalnya nonaktif lewat baris 'disabled' di dalamnya. Kalau baris
+    'disabled' itu ikut terhapus/tidak ada (misalnya waktu refind.conf pernah
+    diedit manual), stanza itu jadi AKTIF dan akan selalu muncul sebagai entri
+    boot terpisah, TANPA ikon OS (karena tidak ada baris 'icon' di dalamnya) --
+    yaitu ikon generik/kubus/ketupat. Ini satu-satunya jenis entri yang tidak
+    akan pernah hilang lewat opsi declutter manapun, karena bukan hasil scan.
+
+    Mengembalikan list dict: {"name": str, "start_line": int, "disabled": bool,
+    "commented": bool}. Deteksi bertingkat sederhana berbasis kurung kurawal,
+    cukup untuk refind.conf yang format standar (tidak menangani kurung kurawal
+    di dalam string literal secara khusus, karena itu tidak umum dipakai rEFInd).
+    """
+    stanzas: List[dict] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        raw = lines[i]
+        stripped = raw.strip()
+        commented = stripped.startswith("#")
+        check = stripped.lstrip("#").strip()
+        if check.lower().startswith("menuentry"):
+            name = check[len("menuentry"):].strip()
+            name = name.split("{", 1)[0].strip().strip('"')
+            depth = raw.count("{") - raw.count("}")
+            disabled = False
+            j = i
+            while j < n and (j == i or depth > 0):
+                line = lines[j]
+                if j != i:
+                    depth += line.count("{") - line.count("}")
+                body_stripped = line.strip().lstrip("#").strip()
+                if body_stripped == "disabled":
+                    disabled = True
+                j += 1
+                if depth <= 0 and j > i:
+                    break
+            stanzas.append({
+                "name": name or "(tanpa nama)",
+                "start_line": i,
+                "disabled": disabled,
+                "commented": commented,
+            })
+            i = j if j > i else i + 1
+        else:
+            i += 1
+    return stanzas
+
+
 def activate_theme(lines: List[str], theme_name: str) -> List[str]:
     """Kembalikan salinan `lines` baru dengan hanya `theme_name` yang aktif;
     tema lain otomatis dikomentari. Jika baris include untuk `theme_name` belum

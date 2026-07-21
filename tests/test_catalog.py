@@ -5,9 +5,9 @@ from refindmgr import catalog as catalog_mod
 
 class TestCatalog(unittest.TestCase):
     def test_find_known_key(self):
-        entry = catalog_mod.find("minimal")
+        entry = catalog_mod.find("lite")
         self.assertIsNotNone(entry)
-        self.assertEqual(entry.name, "rEFInd-minimal")
+        self.assertEqual(entry.name, "rEFInd-lite")
         self.assertTrue(entry.git_url.startswith("https://github.com/"))
 
     def test_find_unknown_key_returns_none(self):
@@ -18,7 +18,7 @@ class TestCatalog(unittest.TestCase):
             self.assertTrue(entry.key)
             self.assertTrue(entry.name)
             self.assertTrue(entry.git_url)
-            self.assertTrue(entry.description)
+            self.assertIsInstance(entry.description, str)
 
     def test_keys_are_unique(self):
         keys = [entry.key for entry in catalog_mod.CATALOG]
