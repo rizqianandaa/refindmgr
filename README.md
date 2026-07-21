@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/refindmgr.svg" width="128" alt="refindmgr logo">
+  <img src="assets/refindmgr.svg" width="480" alt="refindmgr logo">
   <h1>refindmgr</h1>
   <p><strong>A simple CLI for installing and managing rEFInd themes.</strong></p>
   <p>
