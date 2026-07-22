@@ -274,7 +274,7 @@ class TestCliSmoke(unittest.TestCase):
             timeout=10,
         )
         self.assertEqual(result.returncode, 0)
-        self.assertIn("v2.", result.stdout)
+        self.assertIn(f"v{cli_mod.__version__}", result.stdout)
         self.assertIn("Sampai jumpa", result.stdout)
 
     def test_interactive_menu_quit_option_exits_cleanly(self):
@@ -660,7 +660,7 @@ class TestAutoCleanMenu(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, "-m", "refindmgr.cli", "--refind-dir", str(refind_dir)],
                 cwd=root,
-                input="10\ny\n\n0\n",
+                input="8\ny\n\n0\n",
                 capture_output=True,
                 text=True,
             )

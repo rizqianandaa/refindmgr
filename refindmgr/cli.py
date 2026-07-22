@@ -91,12 +91,12 @@ def cmd_list(args: argparse.Namespace) -> None:
 
     print(f"Tema terpasang di {refind_dir / 'themes'}:\n")
     for name in installed:
-        marker = "* " if name == active else "  "
+        marker = f"{_GREEN}●{_RESET} " if name == active else "  "
         print(f"{marker}{name}")
     if active is None:
         print("\n(Tidak ada tema aktif -- rEFInd memakai tampilan default.)")
     else:
-        print(f"\n(* = tema aktif saat ini: {active})")
+        print(f"\n({_GREEN}●{_RESET} = tema aktif saat ini: {active})")
     if len(active_list) > 1:
         print(
             f"\nPERINGATAN: ditemukan {len(active_list)} baris include tema aktif sekaligus "
@@ -135,6 +135,10 @@ def _activate(refind_dir: Path, theme_name: str, include_path: Optional[str] = N
         for i, line in enumerate(new_lines):
             if line.strip().lower() in {"include rose-pine/theme.conf", "include refind-sublime/theme.conf"}:
                 new_lines[i] = "# " + line.strip()
+    # A theme may define its own showtools directive. Keep refindmgr's managed
+    # OS-only block last so its shutdown/reboot setting always wins, including
+    # when a different theme is activated after OS-only mode was enabled.
+    new_lines = _move_managed_clean_menu_to_end(new_lines)
     if new_lines == lines:
         print(f"Tema '{theme_name}' sudah aktif. Tidak ada perubahan dan tidak membuat backup baru.")
         return
@@ -602,11 +606,34 @@ def cmd_declutter(args: argparse.Namespace) -> None:
 _CLEAN_MENU_BEGIN = "# refindmgr-clean-menu: begin"
 _CLEAN_MENU_END = "# refindmgr-clean-menu: end"
 _CLEAN_MENU_PREVIOUS = "# refindmgr-clean-menu: previous-scanfor="
+_CLEAN_MENU_PREVIOUS_SHOWTOOLS = "# refindmgr-clean-menu: previous-showtools="
 
 
-def _remove_managed_clean_menu(lines: list) -> tuple[list, Optional[str]]:
+def _move_managed_clean_menu_to_end(lines: list) -> list:
+    """Keep the managed block after theme includes and repair old blocks."""
+    start = next((i for i, line in enumerate(lines) if line.strip() == _CLEAN_MENU_BEGIN), None)
+    if start is None:
+        return list(lines)
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].strip() == _CLEAN_MENU_END),
+        None,
+    )
+    if end is None:
+        return list(lines)
+    block = list(lines[start:end + 1])
+    if not any(line.strip().lower().startswith("showtools ") for line in block):
+        block.insert(-1, f"showtools {MINIMAL_SHOWTOOLS}")
+    remaining = list(lines[:start]) + list(lines[end + 1:])
+    while remaining and not remaining[-1].strip():
+        remaining.pop()
+    if remaining:
+        remaining.append("")
+    return remaining + block
+
+
+def _remove_managed_clean_menu(lines: list) -> tuple[list, Optional[str], Optional[str]]:
     """Hapus blok menu manual yang sebelumnya dibuat refindmgr, bila ada."""
-    result, previous, inside = [], None, False
+    result, previous, previous_showtools, inside = [], None, None, False
     for line in lines:
         stripped = line.strip()
         if stripped == _CLEAN_MENU_BEGIN:
@@ -618,11 +645,13 @@ def _remove_managed_clean_menu(lines: list) -> tuple[list, Optional[str]]:
         if inside:
             if stripped.startswith(_CLEAN_MENU_PREVIOUS):
                 previous = stripped[len(_CLEAN_MENU_PREVIOUS):]
+            elif stripped.startswith(_CLEAN_MENU_PREVIOUS_SHOWTOOLS):
+                previous_showtools = stripped[len(_CLEAN_MENU_PREVIOUS_SHOWTOOLS):]
             continue
         result.append(line)
     if inside:
         raise CLIError("Blok clean-menu lama tidak lengkap; pulihkan refind.conf dari backup sebelum melanjutkan.")
-    return result, previous
+    return result, previous, previous_showtools
 
 
 def _parse_os_specs(specs: list[str], refind_dir: Path, lines: list) -> list[tuple[str, str]]:
@@ -706,7 +735,7 @@ def cmd_clean_menu(args: argparse.Namespace) -> None:
     if not conf_path.is_file():
         raise CLIError(f"refind.conf tidak ditemukan di {refind_dir}")
     lines = conf_mod.read_lines(conf_path)
-    base_lines, saved_previous = _remove_managed_clean_menu(lines)
+    base_lines, saved_previous, saved_previous_showtools = _remove_managed_clean_menu(lines)
 
     if args.undo:
         if saved_previous is None:
@@ -717,6 +746,12 @@ def cmd_clean_menu(args: argparse.Namespace) -> None:
             restored = conf_mod.unset_global_option(base_lines, "scanfor")
         else:
             restored = conf_mod.set_global_option(base_lines, "scanfor", saved_previous)
+        if saved_previous_showtools == "__DEFAULT__":
+            restored = conf_mod.unset_global_option(restored, "showtools")
+        elif saved_previous_showtools is not None:
+            restored = conf_mod.set_global_option(
+                restored, "showtools", saved_previous_showtools
+            )
         conf_mod.write_lines(conf_path, restored)
         print("Berhasil membatalkan mode OS saja.")
         print(f"Backup: {backup_path}")
@@ -757,24 +792,27 @@ def cmd_clean_menu(args: argparse.Namespace) -> None:
 
     old_scanfor = conf_mod.get_global_option(base_lines, "scanfor")
     previous = old_scanfor if old_scanfor is not None else "__DEFAULT__"
+    old_showtools = conf_mod.get_global_option(base_lines, "showtools")
+    previous_showtools = old_showtools if old_showtools is not None else "__DEFAULT__"
     new_lines = conf_mod.set_global_option(base_lines, "scanfor", "manual")
     if new_lines and new_lines[-1].strip():
         new_lines.append("")
-    new_lines.extend([_CLEAN_MENU_BEGIN, _CLEAN_MENU_PREVIOUS + previous])
+    new_lines.extend([
+        _CLEAN_MENU_BEGIN,
+        _CLEAN_MENU_PREVIOUS + previous,
+        _CLEAN_MENU_PREVIOUS_SHOWTOOLS + previous_showtools,
+    ])
     for name, relative_path in os_entries:
         new_lines.extend([f'menuentry "{name}" {{', f"    loader /{relative_path}", "}"])
-    new_lines.append(_CLEAN_MENU_END)
+    new_lines.extend([f"showtools {MINIMAL_SHOWTOOLS}", _CLEAN_MENU_END])
 
     _warn_if_not_root()
-    backup_path = conf_mod.backup(conf_path)
+    conf_mod.backup(conf_path)
     conf_mod.write_lines(conf_path, new_lines)
     print("Berhasil menerapkan mode OS saja.")
     print("OS yang tampil:")
     for name, path in os_entries:
         print(f"- {name}: /{path}")
-    print("Ikon penguin, kotak/fallback, dan loader duplikat disembunyikan.")
-    print(f"Backup: {backup_path}")
-    print("Reboot untuk melihat hasilnya. Batalkan: refindmgr clean-menu --undo")
 
 def cmd_backup(args: argparse.Namespace) -> None:
     refind_dir = _resolve_refind_dir(args)
@@ -1271,45 +1309,67 @@ def _menu_list(top_args: argparse.Namespace) -> None:
     cmd_list(top_args)
 
 
+_CATALOG_PREVIEW_WIDTH = 160
+
+
 def _catalog_preview_path(entry) -> Optional[Path]:
-    """Cache one small original preview per catalog entry."""
-    cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "refindmgr" / "catalog"
-    cache.mkdir(parents=True, exist_ok=True)
-    existing = sorted(cache.glob(f"{entry.key}.*"))
-    if existing:
-        return existing[0]
-    try:
-        with themes_mod.prepare_theme_source(entry.git_url) as prepared:
-            image = themes_mod.preview_image(prepared.root, prepared.variants[0])
-            if image is None:
-                return None
-            destination = cache / f"{entry.key}{image.suffix.lower()}"
-            shutil.copy2(image, destination)
-            return destination
-    except (themes_mod.ThemeError, OSError):
-        return None
+    """Return the bundled, optimized preview without network access."""
+    image = Path(__file__).resolve().parent / "assets" / "previews" / f"{entry.key}.jpg"
+    return image if image.is_file() else None
+
+
+def _catalog_preview_column(title: str, image_width: int) -> Optional[int]:
+    """Align every catalog image in one column, or fall back below when narrow."""
+    columns = shutil.get_terminal_size((100, 24)).columns
+    image_columns = max(1, (image_width + 7) // 8)
+    longest_title = max(
+        len(f"  {index}. {entry.name}")
+        for index, entry in enumerate(catalog_mod.CATALOG, start=1)
+    )
+    column = longest_title + 5
+    return column if column + image_columns - 1 <= columns else None
 
 
 def _menu_install(top_args: argparse.Namespace) -> None:
     if _require_refind_dir(top_args) is None:
         return
-    print("Katalog tema — preview asli ditampilkan kecil di bawah setiap tema:\n")
-    preview_ready, preview_note = sixel_mod.availability()
-    if not preview_ready:
+    _clear_screen()
+    print("Katalog tema:\n")
+    preview_status, preview_note = sixel_mod.detection_status()
+    preview_ready = preview_status == "ready"
+    if preview_status == "unknown":
+        print(f"Terminal tidak melaporkan kemampuan Sixel: {preview_note}.")
+        preview_ready = _confirm(
+            "img2sixel tersedia. Coba tampilkan preview Sixel?",
+            default=True,
+        )
+        if not preview_ready:
+            print("Preview dilewati. Pakai REFINDMGR_SIXEL=1 untuk mengaktifkannya otomatis.\n")
+    elif preview_status == "unavailable":
         print(f"Preview Sixel tidak tersedia: {preview_note}.\n")
     for index, entry in enumerate(catalog_mod.CATALOG, start=1):
-        print(f"  [{index}/{len(catalog_mod.CATALOG)}] {entry.name}  ({entry.key})")
+        title = f"  {index}. {entry.name}"
         if preview_ready:
-            print("      Memuat preview...", flush=True)
             image = _catalog_preview_path(entry)
             if image:
-                shown, note = sixel_mod.show(image, width=280)
+                column = _catalog_preview_column(title, _CATALOG_PREVIEW_WIDTH)
+                if column is None:
+                    print(title)
+                    column = 5
+                else:
+                    print(title, end="", flush=True)
+                shown, note = sixel_mod.show(
+                    image,
+                    width=_CATALOG_PREVIEW_WIDTH,
+                    force=True,
+                    column=column,
+                )
                 if not shown:
                     print(f"      Preview gagal: {note}")
             else:
-                print("      Preview asli tidak ditemukan.")
-        print(f"      {entry.git_url}")
-        print("      " + "─" * 42)
+                print(f"{title}  (preview tidak tersedia)")
+        else:
+            print(title)
     choice = _prompt(f"Pilih nomor tema (1-{len(catalog_mod.CATALOG)})")
     if not choice.isdigit() or not 1 <= int(choice) <= len(catalog_mod.CATALOG):
         print("Dibatalkan: nomor tema tidak valid.")
@@ -1364,11 +1424,19 @@ def _menu_activate(top_args: argparse.Namespace) -> None:
     if refind_dir is None:
         return
     installed = themes_mod.list_installed(refind_dir)
-    print("Tema terpasang: " + (", ".join(installed) if installed else "(tidak ada)"))
-    name = _prompt("Nama tema yang diaktifkan")
-    if not name:
-        print("Dibatalkan.")
+    if not installed:
+        print("Tidak ada tema terpasang untuk diaktifkan.")
         return
+    active = conf_mod.get_active_theme(conf_mod.read_lines(refind_conf_path(refind_dir)))
+    print("Pilih tema yang diaktifkan:")
+    for index, name in enumerate(installed, start=1):
+        active_note = f" {_GREEN}● aktif{_RESET}" if name == active else ""
+        print(f"  {index}) {name}{active_note}")
+    choice = _prompt(f"Pilih nomor tema (1-{len(installed)})")
+    if not choice.isdigit() or not 1 <= int(choice) <= len(installed):
+        print("Dibatalkan: nomor tema tidak valid.")
+        return
+    name = installed[int(choice) - 1]
     _menu_loading("Mengaktifkan")
     cmd_activate(argparse.Namespace(name=name, **_carry(top_args)))
 
@@ -1481,6 +1549,34 @@ def _menu_clean_menu_auto(top_args: argparse.Namespace) -> None:
     if not _confirm("Tampilkan hanya OS ini?", default=False):
         print("Dibatalkan.")
         return
+    manager = system_mod.detect_package_manager()
+    installed_version = (
+        system_mod.get_installed_refind_version(manager) if manager is not None else None
+    )
+    if (
+        installed_version is not None
+        and system_mod.version_tuple(installed_version) >= system_mod.version_tuple("0.14.2")
+    ):
+        print(
+            f"\nrEFInd {installed_version} terdeteksi. Versi 0.14.2+ memiliki bug upstream "
+            "yang membuat 'showtools' diabaikan, sehingga semua tombol tetap tampil.\n"
+            f"refindmgr akan menyesuaikannya ke {system_mod.TARGET_REFIND_VERSION} dan "
+            "menyegarkan binari rEFInd di partisi EFI terlebih dahulu."
+        )
+        cmd_setup(argparse.Namespace(
+            yes=True, pin_version=True, refresh_esp=True,
+            allow_direct_download=True, target_version=None, **_carry(top_args)
+        ))
+        repaired_version = system_mod.get_installed_refind_version(manager)
+        if (
+            repaired_version is None
+            or system_mod.version_tuple(repaired_version) >= system_mod.version_tuple("0.14.2")
+        ):
+            print(
+                "Mode OS saja dibatalkan karena versi rEFInd yang terkena bug 'showtools' "
+                "belum berhasil diperbaiki. Tidak ada konfigurasi menu yang diterapkan."
+            )
+            return
     _menu_loading()
     cmd_clean_menu(argparse.Namespace(os=[], auto=True, apply=True, undo=False, **_carry(top_args)))
 
@@ -1533,8 +1629,8 @@ def _menu_setup(top_args: argparse.Namespace) -> None:
     if yes:
         _menu_loading("Menyiapkan")
     cmd_setup(argparse.Namespace(
-        yes=yes, pin_version=False, refresh_esp=False,
-        allow_direct_download=False, target_version=None, **_carry(top_args)
+        yes=yes, pin_version=True, refresh_esp=True,
+        allow_direct_download=True, target_version=None, **_carry(top_args)
     ))
 
 
@@ -1548,8 +1644,8 @@ _MENU_SECTIONS = [
         ("6", "Hapus tema", _menu_remove),
         ("7", "Ganti varian tema", _menu_variant),
     ]),
-    ("Backup refind.conf", [("8", "Buat backup sekarang", _menu_backup), ("9", "Restore dari backup", _menu_restore)]),
-    ("Tampilan boot", [("10", "Hanya tampilkan OS saja", _menu_clean_menu_auto), ("11", "Batalkan mode OS saja", _menu_clean_menu_undo)]),
+    ("Tampilan boot", [("8", "Hanya tampilkan OS saja", _menu_clean_menu_auto), ("9", "Batalkan mode OS saja", _menu_clean_menu_undo)]),
+    ("Backup refind.conf", [("10", "Buat backup sekarang", _menu_backup), ("11", "Restore dari backup", _menu_restore)]),
     ("Sistem", [("12", "Diagnostik (doctor)", _menu_doctor), ("13", "Pasang rEFInd itu sendiri (setup)", _menu_setup)]),
 ]
 

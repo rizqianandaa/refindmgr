@@ -1,6 +1,6 @@
 [project]
 name = "refindmgr"
-version = "2.1.1"
+version = "1.1.2"
 description = "CLI ringan untuk memasang, mengganti, dan menghapus tema rEFInd tanpa edit manual refind.conf."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -16,3 +16,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["refindmgr*"]
+
+[tool.setuptools.package-data]
+refindmgr = ["assets/previews/*.jpg"]
