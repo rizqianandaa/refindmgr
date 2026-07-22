@@ -37,10 +37,13 @@ def detect_refind_dir(explicit: Optional[str] = None) -> Optional[Path]:
 
     for candidate in candidates:
         path = Path(candidate)
-        if (path / "refind.conf").is_file():
-            return path
+        try:
+            if (path / "refind.conf").is_file():
+                return path
+        except OSError:
+            continue
+        
     return None
-
 
 def refind_conf_path(refind_dir: Path) -> Path:
     return Path(refind_dir) / "refind.conf"
