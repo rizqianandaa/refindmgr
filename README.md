@@ -1,6 +1,5 @@
 <div align="center">
-  <img src="assets/refindmgr.svg" width="480" alt="refindmgr logo">
-  <h1>refindmgr</h1>
+  <img src="assets/refindmgr.svg" width="450" alt="refindmgr logo">
   <p><strong>A simple CLI for installing and managing rEFInd themes.</strong></p>
   <p>
     <img src="https://img.shields.io/badge/version-1.0.0-8b5cf6.svg" alt="version 1.0.0">
