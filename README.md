@@ -2,7 +2,7 @@
   <img src="assets/refindmgr.svg" width="450" alt="refindmgr logo">
   <p><strong>A simple CLI for installing and managing rEFInd themes.</strong></p>
   <p>
-    <img src="https://img.shields.io/badge/version-1.0.0-8b5cf6.svg" alt="version 1.0.0">
+    <img src="https://img.shields.io/badge/version-1.2.1-8b5cf6.svg" alt="version 1.2.1">
     <img src="https://img.shields.io/badge/python-3.9%2B-3776ab.svg" alt="Python 3.9+">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e.svg" alt="MIT License"></a>
   </p>
@@ -17,6 +17,7 @@ refindmgr manages rEFInd themes without requiring manual edits to `refind.conf`.
 - Activate, deactivate, update, and remove themes from one CLI.
 - Back up and restore `refind.conf` safely.
 - Diagnose and configure rEFInd through guided commands.
+- Safely manage firmware compatibility mode when UEFI ignores custom BootOrder entries.
 
 ## Requirements
 
@@ -29,6 +30,12 @@ refindmgr manages rEFInd themes without requiring manual edits to `refind.conf`.
 ```bash
 chmod +x install.sh uninstall.sh
 sudo ./install.sh
+```
+
+Install only the CLI without running rEFInd setup:
+
+```bash
+sudo ./install.sh --cli-only
 ```
 
 Run the interactive menu:
@@ -56,6 +63,7 @@ sudo refindmgr
 | `refindmgr clean-menu` | Create an OS-only boot menu |
 | `refindmgr doctor` | Run diagnostics |
 | `refindmgr setup` | Preview or install rEFInd |
+| `refindmgr firmware-compat <action>` | Detect, enable, adopt, refresh, or restore firmware compatibility mode |
 
 ## License
 

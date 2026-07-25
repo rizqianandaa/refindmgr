@@ -40,6 +40,22 @@ class TestListInstalled(unittest.TestCase):
             (t_dir / "not-a-theme").mkdir()
             self.assertEqual(themes_mod.list_installed(refind_dir), ["good-theme"])
 
+    def test_lists_variant_only_theme_and_resolves_active_config(self):
+        with TemporaryDirectory() as tmp:
+            refind_dir = _make_refind_dir(tmp)
+            theme = themes_dir(refind_dir) / "catppuccin"
+            theme.mkdir(parents=True)
+            (theme / "latte.conf").write_text("x")
+            (theme / "macchiato.conf").write_text("y")
+            (refind_dir / "refind.conf").write_text(
+                "include themes/catppuccin/macchiato.conf\n"
+            )
+            self.assertEqual(themes_mod.list_installed(refind_dir), ["catppuccin"])
+            self.assertEqual(
+                themes_mod.theme_conf_path(refind_dir, "catppuccin"),
+                theme / "macchiato.conf",
+            )
+
 
 class TestInstallFromLocalDir(unittest.TestCase):
     def test_install_copies_theme_and_returns_name(self):

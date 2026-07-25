@@ -635,19 +635,47 @@ def _remove_theme_metadata(refind_dir: Path, name: str) -> None:
 
 
 def theme_conf_path(refind_dir: Path, theme_name: str) -> Optional[Path]:
+    conf_path = refind_conf_path(refind_dir)
+    if conf_path.is_file():
+        for line in conf_mod.read_lines(conf_path):
+            match = conf_mod.INCLUDE_RE.match(line.strip())
+            if not match or match.group("name").casefold() != theme_name.casefold():
+                continue
+            relative = Path(match.group("config").replace("\\", "/"))
+            candidate = themes_dir(refind_dir) / theme_name / relative
+            try:
+                candidate.resolve().relative_to((themes_dir(refind_dir) / theme_name).resolve())
+            except ValueError:
+                continue
+            if candidate.is_file():
+                return candidate
     candidate = themes_dir(refind_dir) / theme_name / "theme.conf"
-    return candidate if candidate.is_file() else None
+    if candidate.is_file():
+        return candidate
+    variants = sorted((themes_dir(refind_dir) / theme_name).glob("*.conf"))
+    return variants[0] if len(variants) == 1 else None
 
 
 def list_installed(refind_dir: Path) -> List[str]:
     directory = themes_dir(refind_dir)
-    names = []
+    names = set()
     if directory.is_dir():
-        names.extend(child.name for child in directory.iterdir() if child.is_dir() and (child / "theme.conf").is_file())
+        for child in directory.iterdir():
+            if child.is_dir() and any(path.is_file() for path in child.glob("*.conf")):
+                names.add(child.name)
+    names.update(
+        name for name in _read_metadata(refind_dir)
+        if (directory / name).is_dir()
+    )
+    conf_path = refind_conf_path(refind_dir)
+    if conf_path.is_file():
+        for _idx, name, _active in conf_mod.find_theme_includes(conf_mod.read_lines(conf_path)):
+            if (directory / name).is_dir():
+                names.add(name)
     # Recognize legacy special-theme layouts created by refindmgr <=1.0.2.
     for legacy in ("rose-pine", "refind-sublime"):
-        if (Path(refind_dir) / legacy / "theme.conf").is_file() and legacy not in names:
-            names.append(legacy)
+        if (Path(refind_dir) / legacy / "theme.conf").is_file():
+            names.add(legacy)
     return sorted(names)
 
 

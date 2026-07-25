@@ -27,6 +27,10 @@ class TestFindThemeIncludes(unittest.TestCase):
     def test_no_matches_returns_empty(self):
         self.assertEqual(conf_mod.find_theme_includes(["timeout 5"]), [])
 
+    def test_finds_variant_config_include(self):
+        lines = ["include themes/catppuccin/macchiato.conf"]
+        self.assertEqual(conf_mod.find_theme_includes(lines), [(0, "catppuccin", True)])
+
 
 class TestGetActiveTheme(unittest.TestCase):
     def test_returns_active_name(self):
@@ -75,6 +79,11 @@ class TestActivateTheme(unittest.TestCase):
         self.assertEqual(conf_mod.get_active_theme(new_lines), "old-theme")
         self.assertEqual(new_lines.count("include themes/old-theme/theme.conf"), 1)
 
+    def test_reactivate_preserves_variant_config_path(self):
+        lines = ["# include themes/catppuccin/macchiato.conf"]
+        new_lines = conf_mod.activate_theme(lines, "catppuccin")
+        self.assertEqual(new_lines, ["include themes/catppuccin/macchiato.conf"])
+
 
 class TestDeactivateAll(unittest.TestCase):
     def test_comments_out_active_theme(self):
@@ -86,6 +95,13 @@ class TestDeactivateAll(unittest.TestCase):
         lines = ["# include themes/foo/theme.conf"]
         new_lines = conf_mod.deactivate_all(lines)
         self.assertEqual(lines, new_lines)
+
+    def test_deactivate_preserves_variant_config_path(self):
+        lines = ["include themes/catppuccin/macchiato.conf"]
+        self.assertEqual(
+            conf_mod.deactivate_all(lines),
+            ["# include themes/catppuccin/macchiato.conf"],
+        )
 
 
 class TestRemoveThemeIncludes(unittest.TestCase):

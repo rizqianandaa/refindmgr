@@ -16,6 +16,7 @@ from . import conf as conf_mod
 from . import system as system_mod
 from . import themes as themes_mod
 from . import sixel as sixel_mod
+from . import firmware_compat as compat_mod
 from . import __version__
 from .paths import detect_refind_dir, refind_conf_path
 
@@ -139,6 +140,7 @@ def _activate(refind_dir: Path, theme_name: str, include_path: Optional[str] = N
     # OS-only block last so its shutdown/reboot setting always wins, including
     # when a different theme is activated after OS-only mode was enabled.
     new_lines = _move_managed_clean_menu_to_end(new_lines)
+    new_lines = _move_managed_firmware_compat_to_end(new_lines)
     if new_lines == lines:
         print(f"Tema '{theme_name}' sudah aktif. Tidak ada perubahan dan tidak membuat backup baru.")
         return
@@ -222,7 +224,20 @@ def cmd_activate(args: argparse.Namespace) -> None:
         raise CLIError(
             f"Tema '{args.name}' belum terpasang. Tema yang tersedia: {', '.join(installed) or '(tidak ada)'}"
         )
-    legacy_include = f"{args.name}/theme.conf" if not (refind_dir / "themes" / args.name / "theme.conf").is_file() else None
+    theme_dir = refind_dir / "themes" / args.name
+    if theme_dir.is_dir():
+        includes = [
+            name for _idx, name, _active
+            in conf_mod.find_theme_includes(conf_mod.read_lines(refind_conf_path(refind_dir)))
+        ]
+        if not (theme_dir / "theme.conf").is_file() and args.name not in includes:
+            raise CLIError(
+                f"Tema '{args.name}' memiliki beberapa konfigurasi varian tanpa theme.conf kanonis. "
+                "Pilih varian terlebih dahulu dengan 'refindmgr variant <nama> --set <varian>'."
+            )
+        legacy_include = None
+    else:
+        legacy_include = f"{args.name}/theme.conf"
     _activate(refind_dir, args.name, include_path=legacy_include)
 
 
@@ -414,6 +429,15 @@ def _fallback_duplicates(refind_dir: Path, keep_path: Path) -> list[str]:
 def cmd_dedupe(args: argparse.Namespace) -> None:
     """Pratinjau atau terapkan pengurangan entri boot secara path-aware dan aman."""
     refind_dir = _resolve_refind_dir(args)
+    try:
+        compat_status = compat_mod.load_status(refind_dir)
+    except compat_mod.FirmwareCompatError as exc:
+        raise CLIError(str(exc)) from exc
+    if compat_status is not None:
+        raise CLIError(
+            "Dedupe umum dinonaktifkan saat mode kompatibilitas firmware aktif. "
+            "Gunakan 'refindmgr firmware-compat status' agar loader vendor terkelola tidak dianggap duplikat."
+        )
     conf_path = refind_conf_path(refind_dir)
     if not conf_path.is_file():
         raise CLIError(f"refind.conf tidak ditemukan di {refind_dir}")
@@ -631,6 +655,30 @@ def _move_managed_clean_menu_to_end(lines: list) -> list:
     return remaining + block
 
 
+def _move_managed_firmware_compat_to_end(lines: list) -> list:
+    """Pastikan directive menu kompatibilitas menang atas include tema."""
+    marker_pairs = (
+        ("# refindmgr-firmware-compat: begin", "# refindmgr-firmware-compat: end"),
+        ("# refindmgr-hp-compat: begin", "# refindmgr-hp-compat: end"),
+    )
+    result = list(lines)
+    for begin, end in marker_pairs:
+        start = next((i for i, line in enumerate(result) if line.strip() == begin), None)
+        if start is None:
+            continue
+        finish = next((i for i in range(start + 1, len(result)) if result[i].strip() == end), None)
+        if finish is None:
+            return result
+        block = result[start:finish + 1]
+        result = result[:start] + result[finish + 1:]
+        while result and not result[-1].strip():
+            result.pop()
+        if result:
+            result.append("")
+        result.extend(block)
+    return result
+
+
 def _remove_managed_clean_menu(lines: list) -> tuple[list, Optional[str], Optional[str]]:
     """Hapus blok menu manual yang sebelumnya dibuat refindmgr, bila ada."""
     result, previous, previous_showtools, inside = [], None, None, False
@@ -713,11 +761,19 @@ def _detect_standard_os_loaders(refind_dir: Path, lines: list) -> list[tuple[str
     # Terapkan validasi yang sama seperti input manual. Aturan global lama bisa
     # masih mengecualikan grubx64.efi; kandidat seperti itu tidak boleh dipilih.
     safe = []
+    try:
+        own_hash = compat_mod.sha256(compat_mod.refind_binary(refind_dir))
+    except (OSError, compat_mod.FirmwareCompatError):
+        own_hash = None
     for name, relative_path in candidates:
         try:
-            _esp_loader_path(refind_dir, relative_path)
+            loader_path = _esp_loader_path(refind_dir, relative_path)
             _assert_keep_loader_is_not_excluded(lines, relative_path)
+            if own_hash is not None and compat_mod.sha256(loader_path) == own_hash:
+                continue
         except CLIError:
+            continue
+        except OSError:
             continue
         safe.append((name, relative_path))
     return safe
@@ -731,6 +787,15 @@ def cmd_clean_menu(args: argparse.Namespace) -> None:
     menyisakan daftar OS tanpa bergantung pada nama grub/shim/fallback distro.
     """
     refind_dir = _resolve_refind_dir(args)
+    try:
+        compat_status = compat_mod.load_status(refind_dir)
+    except compat_mod.FirmwareCompatError as exc:
+        raise CLIError(str(exc)) from exc
+    if compat_status is not None:
+        raise CLIError(
+            "Menu OS mode kompatibilitas dikelola oleh manifest khusus. "
+            "clean-menu umum ditolak agar Ubuntu tidak salah diarahkan kembali ke rEFInd."
+        )
     conf_path = refind_conf_path(refind_dir)
     if not conf_path.is_file():
         raise CLIError(f"refind.conf tidak ditemukan di {refind_dir}")
@@ -879,6 +944,23 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     root_ok = system_mod.is_root()
     print(f"[{'OK' if root_ok else 'INFO'}]    dijalankan sebagai root" + ("" if root_ok else " (perlu sudo untuk operasi yang menulis ke EFI)"))
     if refind_dir is not None:
+        try:
+            compat_status = compat_mod.load_status(refind_dir)
+        except compat_mod.FirmwareCompatError as exc:
+            print(f"[GAGAL] Manifest mode kompatibilitas: {exc}")
+            compat_status = None
+        if compat_status is not None:
+            label = "terkelola" if compat_status.managed else "legacy/belum diadopsi"
+            print(f"[OK]    Mode kompatibilitas firmware aktif ({label})")
+            print(f"[INFO]  State: {compat_status.state_path}")
+            active_loader = compat_status.data.get("active_loader")
+            expected_hash = compat_status.data.get("refind_sha256")
+            if active_loader and expected_hash:
+                try:
+                    identity_ok = compat_mod.sha256(Path(active_loader)) == expected_hash
+                except OSError:
+                    identity_ok = False
+                print(f"[{'OK' if identity_ok else 'GAGAL'}]    Identitas loader kompatibilitas")
         _print_esp_loader_audit(refind_dir)
     _print_boot_kernel_audit()
 
@@ -1137,6 +1219,18 @@ def cmd_setup(args: argparse.Namespace) -> None:
     rEFInd 0.14.2+ (lihat README bagian Troubleshooting).
     """
     refind_dir = detect_refind_dir(_refind_dir_arg(args))
+    if refind_dir is not None:
+        try:
+            compat_status = compat_mod.load_status(refind_dir)
+        except compat_mod.FirmwareCompatError as exc:
+            raise CLIError(str(exc)) from exc
+        if compat_status is not None:
+            print(
+                f"Mode kompatibilitas firmware aktif di {refind_dir}.\n"
+                "Setup/refind-install otomatis dilewati agar loader vendor, manifest, "
+                "dan jalur pemulihan tidak tertimpa."
+            )
+            return
     manager = system_mod.detect_package_manager()
 
     if refind_dir is not None:
@@ -1205,6 +1299,158 @@ def cmd_setup(args: argparse.Namespace) -> None:
             "\nrefind-install selesai, tapi refindmgr belum bisa mendeteksi lokasi rEFInd secara otomatis.\n"
             "Cek manual lokasi partisi EFI kamu, lalu jalankan: refindmgr --refind-dir <path> doctor"
         )
+
+
+# ---------------------------------------------------------------------------
+# Firmware compatibility mode
+# ---------------------------------------------------------------------------
+
+def _compat_status_from_args(args: argparse.Namespace):
+    target = getattr(args, "target_dir", None)
+    directory = Path(target) if target else compat_mod.detect_compat_dir()
+    if directory is None:
+        return None
+    try:
+        return compat_mod.load_status(directory)
+    except compat_mod.FirmwareCompatError as exc:
+        raise CLIError(str(exc)) from exc
+
+
+def _compat_source_dir(args: argparse.Namespace, active_dir: Optional[Path] = None) -> Path:
+    source = getattr(args, "source_dir", None)
+    if source:
+        return Path(source)
+    if active_dir is not None:
+        candidate = active_dir.parent / "refind"
+        if (candidate / "refind.conf").is_file():
+            return candidate
+    explicit = _refind_dir_arg(args)
+    if explicit and Path(explicit).name.lower() == "refind":
+        return Path(explicit)
+    for candidate in (Path("/boot/efi/EFI/refind"), Path("/boot/EFI/refind"), Path("/efi/EFI/refind")):
+        if (candidate / "refind.conf").is_file():
+            return candidate
+    raise CLIError("Folder rEFInd dedicated tidak ditemukan. Gunakan --source-dir /path/EFI/refind.")
+
+
+def _print_compat_status(status) -> None:
+    print("=== Mode kompatibilitas firmware ===")
+    if status is None:
+        print("Status: tidak aktif")
+        return
+    print(f"Status: {'aktif dan terkelola' if status.managed else 'aktif legacy (belum diadopsi)'}")
+    print(f"Direktori aktif: {status.active_dir}")
+    print(f"State: {status.state_path}")
+    print(f"Mode Linux: {status.data.get('linux_mode', 'grub')}")
+    if status.data.get("active_loader"):
+        print(f"Loader firmware: {status.data['active_loader']}")
+    if status.data.get("original_loader_backup") or status.data.get("shim_backup"):
+        print(f"Backup loader asli: {status.data.get('original_loader_backup') or status.data.get('shim_backup')}")
+
+
+def cmd_firmware_compat(args: argparse.Namespace) -> None:
+    action = args.action
+    status = _compat_status_from_args(args)
+
+    if action == "status":
+        _print_compat_status(status)
+        return
+
+    if action == "enable":
+        if status is not None:
+            raise CLIError("Mode kompatibilitas sudah aktif. Gunakan status, refresh-kernel, atau restore.")
+        source = _compat_source_dir(args)
+        target = Path(args.target_dir) if getattr(args, "target_dir", None) else source.parent / args.vendor
+        linux_info = None
+        linux_mode = "direct" if args.direct_linux else "grub"
+        if linux_mode == "direct":
+            try:
+                linux_info = compat_mod.detect_linux_boot()
+            except compat_mod.FirmwareCompatError as exc:
+                raise CLIError(str(exc)) from exc
+        try:
+            plan = compat_mod.plan_install(source, target, vendor=args.vendor, linux_mode=linux_mode, linux_info=linux_info)
+        except compat_mod.FirmwareCompatError as exc:
+            raise CLIError(str(exc)) from exc
+        print("=== Pratinjau mode kompatibilitas firmware ===")
+        print(f"rEFInd sumber: {plan['source_binary']}")
+        print(f"Path yang diprioritaskan firmware: {plan['active_loader']}")
+        print(f"Ubuntu: {'kernel EFI Stub langsung' if linux_mode == 'direct' else plan['grub_loader']}")
+        print(f"Windows: {plan['windows_loader']}")
+        print("Shim dan refind.conf asli akan dibackup dengan hash di manifest JSON.")
+        if not args.apply:
+            print("Tidak ada perubahan. Tambahkan --apply untuk menerapkan.")
+            return
+        if not system_mod.is_root():
+            raise CLIError("Mode kompatibilitas harus diterapkan sebagai root (sudo).")
+        secure_boot = compat_mod.secure_boot_enabled()
+        if secure_boot is True:
+            raise CLIError("Secure Boot aktif. Mode kompatibilitas ditolak agar firmware tidak memblokir rEFInd.")
+        if secure_boot is None and not args.allow_unknown_secure_boot:
+            raise CLIError("Status Secure Boot tidak dapat diverifikasi. Periksa manual atau gunakan --allow-unknown-secure-boot setelah yakin nonaktif.")
+        try:
+            installed = compat_mod.apply_install(plan)
+        except (OSError, compat_mod.FirmwareCompatError) as exc:
+            raise CLIError(f"Gagal memasang mode kompatibilitas: {exc}") from exc
+        print(f"Mode kompatibilitas berhasil dipasang di {installed.active_dir}.")
+        print("Reboot dan uji kedua OS sebelum membersihkan entry NVRAM apa pun.")
+        return
+
+    if action == "adopt":
+        if status is None or status.managed:
+            raise CLIError("Tidak menemukan mode kompatibilitas legacy yang perlu diadopsi.")
+        if args.apply and not system_mod.is_root():
+            raise CLIError("Adopsi manifest pada ESP membutuhkan sudo.")
+        source = _compat_source_dir(args, status.active_dir)
+        try:
+            adopted = compat_mod.adopt_legacy(status.active_dir, source, apply=args.apply)
+        except (OSError, compat_mod.FirmwareCompatError) as exc:
+            raise CLIError(str(exc)) from exc
+        _print_compat_status(adopted)
+        if args.apply:
+            print("Mode legacy berhasil diadopsi tanpa mengubah loader atau refind.conf.")
+        else:
+            print("Tidak ada perubahan. Tambahkan --apply untuk membuat manifest terkelola.")
+        return
+
+    if status is None:
+        raise CLIError("Mode kompatibilitas tidak aktif.")
+    if not status.managed:
+        raise CLIError("Mode legacy harus di-adopt terlebih dahulu.")
+
+    if action == "refresh-kernel":
+        if not args.apply:
+            print("Symlink kernel direct akan diarahkan ke pasangan kernel/initrd EFI Stub terbaru.")
+            print("Tidak ada perubahan. Tambahkan --apply untuk menerapkan.")
+            return
+        if not system_mod.is_root():
+            raise CLIError("Refresh kernel membutuhkan sudo.")
+        try:
+            version = compat_mod.refresh_kernel_links(status)
+        except (OSError, compat_mod.FirmwareCompatError) as exc:
+            raise CLIError(str(exc)) from exc
+        print(f"Symlink direct boot sekarang menunjuk kernel {version}.")
+        return
+
+    if action == "restore":
+        if args.apply and not system_mod.is_root():
+            raise CLIError("Pemulihan loader dan refind.conf membutuhkan sudo.")
+        try:
+            result = compat_mod.restore(status, apply=args.apply)
+        except (OSError, compat_mod.FirmwareCompatError) as exc:
+            raise CLIError(str(exc)) from exc
+        print("=== Pratinjau pemulihan boot standar ===")
+        print(f"Pulihkan loader: {result['loader_backup']} -> {result['active_loader']}")
+        if result.get("config_backup"):
+            print(f"Pulihkan konfigurasi: {result['config_backup']}")
+        if not args.apply:
+            print("Tidak ada perubahan. Tambahkan --apply untuk memulihkan.")
+            return
+        print("Boot standar berhasil dipulihkan. Rollback perubahan restore:")
+        print(result["rollback_dir"])
+        return
+
+    raise CLIError(f"Aksi mode kompatibilitas tidak dikenal: {action}")
 
 
 # ---------------------------------------------------------------------------
@@ -1284,6 +1530,13 @@ def _print_status_banner(top_args: argparse.Namespace) -> None:
         theme_info = f"aktif: {active}" if active else "tidak ada tema aktif"
         print(f"  {_GREEN}v{_RESET} rEFInd terdeteksi: {_DIM}{refind_dir}{_RESET}")
         print(f"  {_GREEN}v{_RESET} {len(installed)} tema terpasang ({theme_info})")
+        try:
+            compat_status = compat_mod.load_status(refind_dir)
+        except compat_mod.FirmwareCompatError:
+            compat_status = None
+        if compat_status is not None:
+            label = "terkelola" if compat_status.managed else "legacy"
+            print(f"  {_GREEN}v{_RESET} mode kompatibilitas firmware: {label}")
     if not system_mod.is_root():
         print(f"  {_YELLOW}o{_RESET} Bukan root {_DIM}(sudo dibutuhkan untuk aksi yang menulis){_RESET}")
     print(rule)
@@ -1634,6 +1887,55 @@ def _menu_setup(top_args: argparse.Namespace) -> None:
     ))
 
 
+def _menu_firmware_compat(top_args: argparse.Namespace) -> None:
+    status = _compat_status_from_args(argparse.Namespace(**_carry(top_args)))
+    _print_compat_status(status)
+    print()
+    if status is None:
+        if not _confirm("Aktifkan mode kompatibilitas firmware?", default=False):
+            print("Dibatalkan.")
+            return
+        direct = _confirm("Boot Ubuntu langsung tanpa menampilkan GRUB?", default=True)
+        if not _confirm("Lanjut setelah backup otomatis dan pemeriksaan Secure Boot?", default=False):
+            print("Dibatalkan.")
+            return
+        cmd_firmware_compat(argparse.Namespace(
+            action="enable", source_dir=None, target_dir=None, vendor="ubuntu",
+            direct_linux=direct, apply=True, allow_unknown_secure_boot=False,
+            **_carry(top_args),
+        ))
+        return
+    if not status.managed:
+        if not _confirm("Adopsi mode legacy ini ke manifest aman refindmgr?", default=True):
+            print("Dibatalkan.")
+            return
+        cmd_firmware_compat(argparse.Namespace(
+            action="adopt", source_dir=None, target_dir=str(status.active_dir),
+            apply=True, vendor="ubuntu", direct_linux=False,
+            allow_unknown_secure_boot=False, **_carry(top_args),
+        ))
+        return
+    print("  1) Refresh symlink kernel direct")
+    print("  2) Pulihkan boot standar")
+    print("  0) Kembali")
+    choice = _prompt("Pilih aksi", "0")
+    if choice == "1":
+        cmd_firmware_compat(argparse.Namespace(
+            action="refresh-kernel", target_dir=str(status.active_dir), apply=True,
+            source_dir=None, vendor="ubuntu", direct_linux=False,
+            allow_unknown_secure_boot=False, **_carry(top_args),
+        ))
+    elif choice == "2":
+        if not _confirm("Pulihkan shim dan refind.conf asli dari backup manifest?", default=False):
+            print("Dibatalkan.")
+            return
+        cmd_firmware_compat(argparse.Namespace(
+            action="restore", target_dir=str(status.active_dir), apply=True,
+            source_dir=None, vendor="ubuntu", direct_linux=False,
+            allow_unknown_secure_boot=False, **_carry(top_args),
+        ))
+
+
 _MENU_SECTIONS = [
     ("Tema", [
         ("1", "Lihat tema terpasang & aktif", _menu_list),
@@ -1646,7 +1948,11 @@ _MENU_SECTIONS = [
     ]),
     ("Tampilan boot", [("8", "Hanya tampilkan OS saja", _menu_clean_menu_auto), ("9", "Batalkan mode OS saja", _menu_clean_menu_undo)]),
     ("Backup refind.conf", [("10", "Buat backup sekarang", _menu_backup), ("11", "Restore dari backup", _menu_restore)]),
-    ("Sistem", [("12", "Diagnostik (doctor)", _menu_doctor), ("13", "Pasang rEFInd itu sendiri (setup)", _menu_setup)]),
+    ("Sistem", [
+        ("12", "Diagnostik (doctor)", _menu_doctor),
+        ("13", "Pasang rEFInd itu sendiri (setup)", _menu_setup),
+        ("14", "Mode kompatibilitas firmware", _menu_firmware_compat),
+    ]),
 ]
 
 _MENU_HANDLERS = {key: handler for _, items in _MENU_SECTIONS for key, _, handler in items}
@@ -1841,6 +2147,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_setup.add_argument("--allow-direct-download", action="store_true", help="Izinkan fallback paket resmi langsung bila repo distro tidak punya versi target.")
     p_setup.add_argument("--refresh-esp", action="store_true", help="Jalankan refind-install ulang pada instalasi yang sudah ada.")
     p_setup.set_defaults(func=cmd_setup)
+
+    p_compat = sub.add_parser(
+        "firmware-compat",
+        help="Deteksi, pasang, adopsi, kelola, atau pulihkan mode kompatibilitas firmware.",
+        parents=[common],
+    )
+    p_compat.add_argument(
+        "action",
+        choices=("status", "enable", "adopt", "refresh-kernel", "restore"),
+    )
+    p_compat.add_argument("--source-dir", help="Folder rEFInd dedicated, mis. /boot/efi/EFI/refind.")
+    p_compat.add_argument("--target-dir", help="Folder vendor yang diprioritaskan firmware, mis. /boot/efi/EFI/ubuntu.")
+    p_compat.add_argument("--vendor", default="ubuntu", help="Nama folder vendor target (default: ubuntu).")
+    p_compat.add_argument("--direct-linux", action="store_true", help="Boot kernel Linux langsung via EFI Stub, tanpa GRUB terlihat.")
+    p_compat.add_argument("--apply", action="store_true", help="Terapkan perubahan; default hanya pratinjau/status.")
+    p_compat.add_argument(
+        "--allow-unknown-secure-boot",
+        action="store_true",
+        help="Izinkan apply bila status Secure Boot tidak dapat dibaca, setelah diperiksa manual.",
+    )
+    p_compat.set_defaults(func=cmd_firmware_compat)
 
     return parser
 

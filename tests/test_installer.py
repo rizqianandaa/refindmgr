@@ -7,6 +7,13 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class TestInstallerSixelDependency(unittest.TestCase):
+    def test_installer_supports_cli_only_and_compat_guard(self):
+        script = (ROOT / "install.sh").read_text()
+        self.assertIn("--cli-only", script)
+        self.assertIn("firmware-compat.json", script)
+        self.assertIn("hp-compat-state.txt", script)
+        self.assertIn("setup/refind-install otomatis dilewati", script)
+
     def test_installer_auto_installs_img2sixel_on_supported_distros(self):
         script = (ROOT / "install.sh").read_text()
         expected_commands = (

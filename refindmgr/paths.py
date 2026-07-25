@@ -33,7 +33,27 @@ def detect_refind_dir(explicit: Optional[str] = None) -> Optional[Path]:
     env_val = os.environ.get(ENV_OVERRIDE)
     if env_val:
         candidates.append(env_val)
-    candidates.extend(COMMON_REFIND_DIRS)
+    # Explicit choices always win.  A managed firmware-compatibility install
+    # comes next because it is the instance the firmware actually launches;
+    # the conventional EFI/refind directory remains a recovery/source copy.
+    for candidate in candidates:
+        path = Path(candidate)
+        try:
+            if (path / "refind.conf").is_file():
+                return path
+        except OSError:
+            continue
+
+    try:
+        from .firmware_compat import detect_compat_dir
+
+        compat = detect_compat_dir()
+        if compat is not None:
+            return compat
+    except (ImportError, OSError):
+        pass
+
+    candidates = list(COMMON_REFIND_DIRS)
 
     for candidate in candidates:
         path = Path(candidate)
@@ -42,7 +62,7 @@ def detect_refind_dir(explicit: Optional[str] = None) -> Optional[Path]:
                 return path
         except OSError:
             continue
-        
+
     return None
 
 def refind_conf_path(refind_dir: Path) -> Path:

@@ -4,6 +4,19 @@
 # fix so the OS-only mode really can hide unwanted tool buttons.
 set -euo pipefail
 
+CLI_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --cli-only) CLI_ONLY=1 ;;
+    -h|--help)
+      echo "Penggunaan: sudo ./install.sh [--cli-only]"
+      echo "  --cli-only  Pasang CLI tanpa menjalankan setup/refind-install."
+      exit 0
+      ;;
+    *) echo "Argumen tidak dikenal: $arg"; exit 2 ;;
+  esac
+done
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "Jalankan ulang dengan sudo: sudo ./install.sh"
   exit 1
@@ -91,6 +104,27 @@ if ! install_sixel_renderer; then
 fi
 
 echo "Selesai: $(refindmgr --version)"
+
+if [ "$CLI_ONLY" -eq 1 ]; then
+  echo "Mode --cli-only: setup bootloader dilewati."
+  exit 0
+fi
+
+# A compatibility install deliberately owns a firmware-recognised vendor
+# path. Never let the automatic refind-install refresh overwrite it.
+COMPAT_FOUND=0
+for root in /boot/efi /boot /efi; do
+  if compgen -G "$root/EFI/*/.refindmgr/firmware-compat.json" >/dev/null || \
+     compgen -G "$root/EFI/*/.refindmgr/hp-compat-state.txt" >/dev/null; then
+    COMPAT_FOUND=1
+    break
+  fi
+done
+if [ "$COMPAT_FOUND" -eq 1 ]; then
+  echo "Mode kompatibilitas firmware terdeteksi; setup/refind-install otomatis dilewati."
+  echo "Gunakan 'sudo refindmgr firmware-compat status' untuk memeriksa statusnya."
+  exit 0
+fi
 
 # Keep the one-command UX requested by the project: on a real UEFI boot the
 # official refind-install flow is run automatically. A BIOS/legacy boot or a

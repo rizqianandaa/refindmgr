@@ -11,13 +11,20 @@ from typing import List, Optional, Tuple
 
 DEFAULT_BACKUP_LIMIT = 5
 
-# Mencocokkan baris seperti:
+# Mencocokkan konfigurasi kanonis dan konfigurasi varian, misalnya:
 #   include themes/rEFInd-minimal/theme.conf
-#   # include themes/rEFInd-minimal/theme.conf
+#   include themes/catppuccin/macchiato.conf
+#   # include themes/catppuccin/mocha.conf
 INCLUDE_RE = re.compile(
-    r"^(?P<comment>#\s*)?include\s+themes[\\/](?P<name>[^\\/]+)[\\/]theme\.conf\s*$",
+    r"^(?P<comment>#\s*)?include\s+themes[\\/](?P<name>[^\\/\s]+)[\\/]"
+    r"(?P<config>[^#\r\n]+?\.conf)\s*$",
     re.IGNORECASE,
 )
+
+
+def _include_target(match: re.Match) -> str:
+    config = match.group("config").replace("\\", "/")
+    return f"themes/{match.group('name')}/{config}"
 
 
 def read_lines(conf_path: Path) -> List[str]:
@@ -130,7 +137,7 @@ def _files_equal(first: Path, second: Path) -> bool:
 
 def find_theme_includes(lines: List[str]) -> List[Tuple[int, str, bool]]:
     """Kembalikan list (index_baris, nama_tema, aktif_atau_tidak) untuk setiap baris
-    'include themes/<nama>/theme.conf', aktif maupun yang dikomentari."""
+    'include themes/<nama>/<config>.conf', aktif maupun yang dikomentari."""
     results = []
     for idx, line in enumerate(lines):
         match = INCLUDE_RE.match(line.strip())
@@ -218,8 +225,13 @@ def activate_theme(lines: List[str], theme_name: str) -> List[str]:
     ada, baris baru ditambahkan di akhir file."""
     new_lines = list(lines)
     found = False
-    for idx, name, is_active in find_theme_includes(new_lines):
-        target_line = f"include themes/{name}/theme.conf"
+    for idx, line in enumerate(new_lines):
+        match = INCLUDE_RE.match(line.strip())
+        if not match:
+            continue
+        name = match.group("name")
+        is_active = not match.group("comment")
+        target_line = f"include {_include_target(match)}"
         if name == theme_name:
             new_lines[idx] = target_line
             found = True
@@ -235,9 +247,10 @@ def activate_theme(lines: List[str], theme_name: str) -> List[str]:
 def deactivate_all(lines: List[str]) -> List[str]:
     """Komentari semua baris include tema yang aktif (kembali ke tampilan default)."""
     new_lines = list(lines)
-    for idx, name, is_active in find_theme_includes(new_lines):
-        if is_active:
-            new_lines[idx] = f"# include themes/{name}/theme.conf"
+    for idx, line in enumerate(new_lines):
+        match = INCLUDE_RE.match(line.strip())
+        if match and not match.group("comment"):
+            new_lines[idx] = f"# include {_include_target(match)}"
     return new_lines
 
 
