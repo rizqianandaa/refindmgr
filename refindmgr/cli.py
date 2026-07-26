@@ -2059,7 +2059,7 @@ def _print_catalog_list(engine) -> None:
     if failed:
         print(f"Preview gagal: {failed}")
     print(f"{_DIM}Preview: {preview_mod.describe(engine)}{_RESET}")
-    if preview_mod.framebuffer_viewer() is not None:
+    if preview_mod.framebuffer_viewer(engine.caps) is not None:
         print(f"{_DIM}Ketik g<nomor> (mis. g2) untuk melihat gambar asli layar penuh.{_RESET}")
     sys.stdout.flush()
 
@@ -2085,7 +2085,7 @@ def _menu_install(top_args: argparse.Namespace) -> None:
             if image is None:
                 print("Preview tidak tersedia untuk tema itu.")
                 continue
-            shown, note = preview_mod.show_fullscreen(image)
+            shown, note = preview_mod.show_fullscreen(image, engine.caps)
             if not shown:
                 print(f"Tidak dapat menampilkan gambar: {note}")
                 _prompt("Tekan Enter untuk kembali", "")

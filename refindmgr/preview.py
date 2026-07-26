@@ -158,10 +158,13 @@ def _build(backend: str, caps: term_mod.TerminalCapabilities, *, forced: bool = 
             return PreviewEngine("none", "chafa/img2sixel belum tersedia untuk Sixel", caps)
         return PreviewEngine("sixel", "", caps, renderer=binary)
     if backend == "framebuffer":
-        # Only on a fixed-font console with no image protocol: that is exactly
-        # where every terminal-side option has already been exhausted.
-        if not forced and (caps.any_graphics or caps.rich_glyphs):
-            return PreviewEngine("none", "framebuffer hanya dipakai di konsol", caps)
+        # Framebuffer writes bypass the terminal and can overwrite a graphical
+        # desktop.  Never infer this from TERM, missing DISPLAY, or glyph
+        # support: require an active kernel /dev/ttyN virtual console.
+        if not caps.linux_console:
+            return PreviewEngine("none", "framebuffer hanya dipakai di Linux VT aktif", caps)
+        if caps.any_graphics:
+            return PreviewEngine("none", "protokol grafis terminal lebih aman", caps)
         if not fb_mod.available():
             return PreviewEngine("none", "framebuffer tidak dapat diakses", caps)
         screen = fb_mod.probe()
@@ -399,7 +402,8 @@ def _run_renderer(command: List[str]) -> Tuple[Optional[bytes], str]:
 def _image_pixels(path: Path) -> Optional[Tuple[int, int]]:
     """Read a PNG/JPEG header for its dimensions, without an image library."""
     try:
-        data = path.open("rb").read(65536)
+        with path.open("rb") as handle:
+            data = handle.read(65536)
     except OSError:
         return None
     if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
@@ -664,7 +668,9 @@ _FRAMEBUFFER_VIEWERS = (
 )
 
 
-def framebuffer_viewer() -> Optional[Tuple[str, List[str]]]:
+def framebuffer_viewer(
+    caps: Optional[term_mod.TerminalCapabilities] = None,
+) -> Optional[Tuple[str, List[str]]]:
     """A way to show a REAL image on a console with no graphics protocol.
 
     No terminal protocol works on the Linux virtual console -- it has no Sixel,
@@ -675,6 +681,11 @@ def framebuffer_viewer() -> Optional[Tuple[str, List[str]]]:
     Returns ``None`` under X/Wayland, where the terminal is a normal emulator
     and taking over the framebuffer would be wrong.
     """
+    if caps is not None:
+        if not caps.linux_console:
+            return None
+    elif not term_mod.linux_virtual_console_name():
+        return None
     if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
         return None
     if not (Path("/dev/fb0").exists() or Path("/dev/dri/card0").exists()):
@@ -686,9 +697,12 @@ def framebuffer_viewer() -> Optional[Tuple[str, List[str]]]:
     return None
 
 
-def show_fullscreen(path: Path) -> Tuple[bool, str]:
+def show_fullscreen(
+    path: Path,
+    caps: Optional[term_mod.TerminalCapabilities] = None,
+) -> Tuple[bool, str]:
     """Display one image full-screen on the console framebuffer."""
-    viewer = framebuffer_viewer()
+    viewer = framebuffer_viewer(caps)
     if viewer is None:
         return False, "tidak ada penampil framebuffer (pasang 'fim' atau 'fbi')"
     binary, args = viewer

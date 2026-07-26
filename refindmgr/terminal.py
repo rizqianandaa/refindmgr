@@ -25,6 +25,7 @@ import select
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 # Kitty graphics support query.  A supporting terminal answers ESC_Gi=31;OK ESC\
@@ -88,6 +89,8 @@ class TerminalCapabilities:
     cell_pixels: Optional[Tuple[int, int]] = None   # (width, height) per cell
     colors: int = 256              # 16, 256 or 16777216
     rich_glyphs: bool = True       # False on fixed-font consoles
+    linux_console: bool = False    # True only for an active /dev/ttyN VT
+    console_name: str = ""         # e.g. tty1
     notes: List[str] = field(default_factory=list)
 
     @property
@@ -153,6 +156,35 @@ def detect_multiplexer() -> str:
         # already handled above, so treat a bare screen-* as GNU screen.
         return "screen"
     return ""
+
+
+def linux_virtual_console_name() -> str:
+    """Return the active Linux VT name, never a GUI/SSH pseudo-terminal.
+
+    ``TERM=linux`` and missing DISPLAY are not sufficient under sudo: both can
+    be inherited or stripped in surprising combinations.  The kernel tty path
+    is authoritative.  When the active-VT sysfs marker is available, require
+    it to match as an additional guard against drawing on a background VT.
+    """
+    name = ""
+    for fd in (0, 1, 2):
+        try:
+            candidate = os.ttyname(fd)
+        except OSError:
+            continue
+        match = re.fullmatch(r"/dev/tty([1-9][0-9]*)", candidate)
+        if match:
+            name = f"tty{match.group(1)}"
+            break
+    if not name:
+        return ""
+    try:
+        active = Path("/sys/class/tty/tty0/active").read_text(encoding="ascii").strip()
+    except OSError:
+        active = ""
+    if active and active != name:
+        return ""
+    return name
 
 
 def _tmux_passthrough_enabled() -> Optional[bool]:
@@ -253,6 +285,12 @@ def probe(timeout: float = 2.0) -> TerminalCapabilities:
         caps.is_tty = False
         caps.notes.append("bukan terminal interaktif")
         return caps
+
+    caps.console_name = linux_virtual_console_name()
+    caps.linux_console = bool(caps.console_name)
+    if caps.linux_console:
+        caps.rich_glyphs = False
+        caps.colors = min(caps.colors, 16)
 
     caps.cell_pixels = cell_pixel_size()
     caps.colors = detect_color_depth()

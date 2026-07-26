@@ -1,11 +1,8 @@
 import io
 import os
-import subprocess
 import sys
 import unittest
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -44,56 +41,41 @@ class TestSixelDetection(unittest.TestCase):
         with patch.dict(os.environ, {"REFINDMGR_SIXEL": "1"}, clear=True):
             self.assertTrue(sixel.terminal_supports_sixel())
 
-    def test_windows_terminal_session_is_recognized(self):
-        with patch.dict(os.environ, {"TERM": "xterm-256color", "WT_SESSION": "uuid"}, clear=True):
+    def test_probe_result_controls_sixel_support(self):
+        from refindmgr import terminal
+        with patch.object(sixel.terminal_mod, "probe", return_value=terminal.TerminalCapabilities(sixel=True)):
             self.assertTrue(sixel.terminal_supports_sixel())
-
-    def test_known_linux_sixel_terminal_is_recognized(self):
-        with patch.dict(os.environ, {"TERM": "wezterm"}, clear=True):
-            self.assertTrue(sixel.terminal_supports_sixel())
-
-    def test_foot_is_not_assumed_to_support_sixel(self):
-        with patch.dict(os.environ, {"TERM": "foot"}, clear=True), patch.object(
-            sixel, "_query_terminal", return_value=None
-        ):
+        with patch.object(sixel.terminal_mod, "probe", return_value=terminal.TerminalCapabilities(responded=True)):
+            self.assertFalse(sixel.terminal_supports_sixel())
+        with patch.object(sixel.terminal_mod, "probe", return_value=terminal.TerminalCapabilities()):
             self.assertIsNone(sixel.terminal_supports_sixel())
 
-    def test_unknown_xterm_is_not_rejected(self):
-        with patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True), patch.object(
-            sixel, "_query_terminal", return_value=None
-        ):
-            self.assertIsNone(sixel.terminal_supports_sixel())
-
-    def test_da1_without_parameter_four_is_inconclusive(self):
-        with patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True), patch.object(
-            sixel, "_query_terminal", return_value=False
-        ):
-            self.assertIsNone(sixel.terminal_supports_sixel())
-
-    def test_detection_reports_unknown_instead_of_unsupported(self):
-        output = _TTYOutput()
-        with patch.object(sixel.sys, "stdout", output), patch(
-            "refindmgr.sixel.shutil.which", return_value="/usr/bin/img2sixel"
-        ), patch.object(sixel, "terminal_supports_sixel", return_value=None):
+    def test_detection_status_delegates_to_preview_stack(self):
+        ready = sixel.preview_mod.PreviewEngine("sixel")
+        unavailable = sixel.preview_mod.PreviewEngine("none", "terminal tidak mendukung Sixel")
+        with patch.object(sixel.preview_mod, "resolve", return_value=ready):
+            self.assertEqual(sixel.detection_status(), ("ready", ""))
+        with patch.object(sixel.preview_mod, "resolve", return_value=unavailable):
             self.assertEqual(
                 sixel.detection_status(),
-                ("unknown", "dukungan Sixel tidak dapat dideteksi otomatis"),
+                ("unavailable", "terminal tidak mendukung Sixel"),
             )
 
-    def test_force_render_uses_img2sixel_after_user_confirmation(self):
+    def test_force_render_keeps_legacy_sixel_api_working(self):
         output = _TTYOutput()
-        completed = SimpleNamespace(returncode=0, stderr=b"")
-        with TemporaryDirectory() as tmp, patch.object(sixel.sys, "stdout", output), patch(
-            "refindmgr.sixel.shutil.which", return_value="/usr/bin/img2sixel"
-        ), patch("refindmgr.sixel.subprocess.run", return_value=completed) as run:
-            image = Path(tmp) / "preview.png"
-            image.write_bytes(b"png")
-            shown, reason = sixel.show(image, width=280, force=True, column=73)
+        from refindmgr import terminal
+        caps = terminal.TerminalCapabilities(sixel=True, cell_pixels=(8, 19))
+        engine = sixel.preview_mod.PreviewEngine("sixel", "", caps, renderer="/usr/bin/img2sixel")
+        with patch("sys.stdout", output), \
+             patch.object(sixel.terminal_mod, "probe", return_value=caps), \
+             patch.object(sixel.preview_mod, "_build", return_value=engine), \
+             patch.object(sixel.preview_mod, "render", return_value=(True, "")) as render:
+            shown, reason = sixel.show(Path("preview.png"), width=280, force=True, column=73)
         self.assertTrue(shown)
         self.assertEqual(reason, "")
         self.assertIn("\x1b[73G", output.text)
-        run.assert_called_once()
-        self.assertEqual(run.call_args.args[0], ["/usr/bin/img2sixel", "-w", "280", str(image)])
+        render.assert_called_once()
+        self.assertEqual(render.call_args.kwargs["columns"], 35)
 
 
 if __name__ == "__main__":

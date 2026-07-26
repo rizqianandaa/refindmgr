@@ -124,8 +124,6 @@ sudo refindmgr clean-menu --auto --apply
 
 Unknown or conflicting loaders are not selected automatically. Systems using managed firmware compatibility mode use the same dynamic inventory while keeping direct Linux boot, backups, and rollback safeguards.
 
-See [support status](docs/SUPPORT.md) for the distro, architecture, firmware, and real-hardware validation matrix.
-
 ## Diagnostics and recovery
 
 Standard diagnostics:

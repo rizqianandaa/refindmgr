@@ -59,6 +59,20 @@ class TestProbeParsing(unittest.TestCase):
         # stray escape bytes into the menu prompt.
         self.assertTrue(term_mod.PROBE.endswith(b"\x1b[c"))
 
+    def test_linux_vt_is_detected_and_active(self):
+        with patch.object(term_mod.os, "ttyname", return_value="/dev/tty2"), \
+             patch.object(term_mod.Path, "read_text", return_value="tty2\n"):
+            self.assertEqual(term_mod.linux_virtual_console_name(), "tty2")
+
+    def test_gui_and_ssh_pts_are_not_linux_vt(self):
+        with patch.object(term_mod.os, "ttyname", return_value="/dev/pts/3"):
+            self.assertEqual(term_mod.linux_virtual_console_name(), "")
+
+    def test_background_linux_vt_is_rejected(self):
+        with patch.object(term_mod.os, "ttyname", return_value="/dev/tty2"), \
+             patch.object(term_mod.Path, "read_text", return_value="tty1\n"):
+            self.assertEqual(term_mod.linux_virtual_console_name(), "")
+
 
 class TestMultiplexerHandling(unittest.TestCase):
     def test_tmux_detected_from_term_when_sudo_stripped_the_env(self):
@@ -391,20 +405,24 @@ class TestFramebufferEscapeHatch(unittest.TestCase):
         # There the terminal is a normal emulator; seizing the framebuffer
         # would blank the user's desktop session.
         with patch.dict("os.environ", {"DISPLAY": ":0"}, clear=True), \
+             patch.object(preview_mod.term_mod, "linux_virtual_console_name", return_value="tty1"), \
              patch.object(preview_mod.shutil, "which", return_value="/usr/bin/fim"):
             self.assertIsNone(preview_mod.framebuffer_viewer())
         with patch.dict("os.environ", {"WAYLAND_DISPLAY": "wayland-0"}, clear=True), \
+             patch.object(preview_mod.term_mod, "linux_virtual_console_name", return_value="tty1"), \
              patch.object(preview_mod.shutil, "which", return_value="/usr/bin/fim"):
             self.assertIsNone(preview_mod.framebuffer_viewer())
 
     def test_not_offered_without_a_framebuffer_device(self):
         with patch.dict("os.environ", {}, clear=True), \
+             patch.object(preview_mod.term_mod, "linux_virtual_console_name", return_value="tty1"), \
              patch.object(preview_mod.Path, "exists", lambda self: False), \
              patch.object(preview_mod.shutil, "which", return_value="/usr/bin/fim"):
             self.assertIsNone(preview_mod.framebuffer_viewer())
 
     def test_offered_on_a_console_with_a_viewer(self):
         with patch.dict("os.environ", {"TERM": "linux"}, clear=True), \
+             patch.object(preview_mod.term_mod, "linux_virtual_console_name", return_value="tty1"), \
              patch.object(preview_mod.Path, "exists", lambda self: True), \
              patch.object(preview_mod.shutil, "which",
                           side_effect=lambda n: "/usr/bin/fim" if n == "fim" else None):
@@ -414,6 +432,7 @@ class TestFramebufferEscapeHatch(unittest.TestCase):
 
     def test_falls_back_through_the_viewer_list(self):
         with patch.dict("os.environ", {"TERM": "linux"}, clear=True), \
+             patch.object(preview_mod.term_mod, "linux_virtual_console_name", return_value="tty1"), \
              patch.object(preview_mod.Path, "exists", lambda self: True), \
              patch.object(preview_mod.shutil, "which",
                           side_effect=lambda n: "/usr/bin/mpv" if n == "mpv" else None):
@@ -427,12 +446,25 @@ class TestFramebufferEscapeHatch(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("fim", note)
 
+    def test_pts_with_framebuffer_device_never_offers_fim(self):
+        caps = _caps(linux_console=False, rich_glyphs=False)
+        with patch.dict("os.environ", {}, clear=True), \
+             patch.object(preview_mod.Path, "exists", return_value=True), \
+             patch.object(preview_mod.shutil, "which", return_value="/usr/bin/fim"):
+            self.assertIsNone(preview_mod.framebuffer_viewer(caps))
+
 
 class TestFramebufferBackend(unittest.TestCase):
     """Real pixels inline on a console, where no protocol exists."""
 
     def _console(self):
-        return _caps(colors=16, rich_glyphs=False)
+        return _caps(colors=16, rich_glyphs=False, linux_console=True, console_name="tty1")
+
+    def test_not_chosen_for_gui_terminal_when_probe_is_silent(self):
+        caps = _caps(colors=16, rich_glyphs=False, linux_console=False)
+        with patch.object(preview_mod.fb_mod, "available", return_value=True), \
+             patch.object(preview_mod, "_chafa", return_value="/usr/bin/chafa"):
+            self.assertEqual(preview_mod.resolve(caps).backend, "chafa")
 
     def test_chosen_on_a_console_over_character_art(self):
         # This is the whole point: ASCII can never resemble a photograph.

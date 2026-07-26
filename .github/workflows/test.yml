@@ -63,7 +63,7 @@ jobs:
           import glob, tarfile, zipfile, sys
           sdist = tarfile.open(glob.glob("dist/*.tar.gz")[0])
           names = {n.split("/", 1)[1] for n in sdist.getnames() if "/" in n}
-          required = {"install.sh", "uninstall.sh", "main.py", "docs/SUPPORT.md"}
+          required = {"install.sh", "uninstall.sh", "main.py"}
           missing = required - names
           wheel = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
           pngs = [n for n in wheel if n.endswith(".png")]
