@@ -113,11 +113,12 @@ class TestCliSmoke(unittest.TestCase):
 
     def test_setup_without_yes_is_a_dry_run_preview_only(self):
         # Without --yes, 'setup' must never actually invoke a package manager
-        # or refind-install; it should only preview what it would do.
+        # or inspect/write the ESP; it should only preview what it would do.
         root = str(Path(__file__).resolve().parent.parent)
         result = run_cli(["--refind-dir", "/does/not/exist", "setup"], cwd=root)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("pratinjau", result.stdout + result.stderr)
-        self.assertNotIn("--yes", "")  # sanity placeholder, real assertions above
+        self.assertNotIn("Permission denied", result.stdout + result.stderr)
 
     def test_full_workflow_install_activate_list_remove(self):
         root = str(Path(__file__).resolve().parent.parent)
@@ -348,6 +349,32 @@ class TestSetupVersionPinning(unittest.TestCase):
         refind_dir.mkdir()
         (refind_dir / "refind.conf").write_text("timeout 5\n")
         return refind_dir
+
+    def test_dry_run_skips_uefi_preflight_without_esp_access(self):
+        args = argparse.Namespace(
+            refind_dir="/does/not/exist",
+            yes=False,
+            pin_version=False,
+            refresh_esp=False,
+            allow_direct_download=False,
+            deb_sha256=None,
+            target_version=None,
+        )
+        buffer = io.StringIO()
+        with patch.object(cli_mod, "Path") as path_cls, \
+             patch.object(cli_mod.system_mod, "detect_package_manager", return_value=self.APT_MANAGER), \
+             patch.object(cli_mod.system_mod, "is_refind_install_available", return_value=False), \
+             patch.object(cli_mod.bootdiag_mod, "collect_report") as preflight_mock, \
+             patch.object(cli_mod.system_mod, "install_package") as install_mock, \
+             patch.object(cli_mod.system_mod, "run_refind_install") as refind_install_mock, \
+             redirect_stdout(buffer):
+            path_cls.return_value.is_dir.return_value = True
+            cli_mod.cmd_setup(args)
+
+        self.assertIn("pratinjau", buffer.getvalue())
+        preflight_mock.assert_not_called()
+        install_mock.assert_not_called()
+        refind_install_mock.assert_not_called()
 
     def test_already_pinned_reports_nothing_to_change(self):
         with TemporaryDirectory() as tmp:

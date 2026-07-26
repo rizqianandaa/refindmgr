@@ -1509,8 +1509,18 @@ def cmd_setup(args: argparse.Namespace) -> None:
             )
             return
     # A real UEFI setup must pass the same read-only forensic gate used by
-    # install.sh.  Calling cmd_setup directly therefore cannot bypass it.
-    if refind_dir is None and Path("/sys/firmware/efi").is_dir():
+    # install.sh. Calling cmd_setup directly therefore cannot bypass it.
+    #
+    # A dry-run must remain usable without root/ESP access: it only describes
+    # package/refind-install actions and returns before any write. Running the
+    # forensic scan during preview made ``refindmgr setup`` fail on unprivileged
+    # systems (including GitHub Actions) while trying to inspect /boot/efi.
+    # Keep the mandatory gate immediately before a confirmed apply instead.
+    if (
+        refind_dir is None
+        and getattr(args, "yes", False)
+        and Path("/sys/firmware/efi").is_dir()
+    ):
         try:
             preflight = bootdiag_mod.collect_report(scan_unmounted=False)
         except bootdiag_mod.DiagnosticError as exc:
