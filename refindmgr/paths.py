@@ -33,16 +33,19 @@ def detect_refind_dir(explicit: Optional[str] = None) -> Optional[Path]:
     env_val = os.environ.get(ENV_OVERRIDE)
     if env_val:
         candidates.append(env_val)
+    # An explicit target that turns out to be wrong must FAIL, not silently
+    # retarget the live boot directory. Mounting a spare ESP at /mnt/esp and
+    # mistyping the path used to send 'remove' at /boot/efi/EFI/refind instead.
+    explicit_requested = bool(candidates)
     # Explicit choices always win.  A managed firmware-compatibility install
     # comes next because it is the instance the firmware actually launches;
     # the conventional EFI/refind directory remains a recovery/source copy.
     for candidate in candidates:
         path = Path(candidate)
-        try:
-            if (path / "refind.conf").is_file():
-                return path
-        except OSError:
-            continue
+        if (path / "refind.conf").is_file():
+            return path
+    if explicit_requested:
+        return None
 
     try:
         from .firmware_compat import detect_compat_dir
@@ -53,15 +56,12 @@ def detect_refind_dir(explicit: Optional[str] = None) -> Optional[Path]:
     except (ImportError, OSError):
         pass
 
-    candidates = list(COMMON_REFIND_DIRS)
-
-    for candidate in candidates:
+    for candidate in COMMON_REFIND_DIRS:
         path = Path(candidate)
-        try:
-            if (path / "refind.conf").is_file():
-                return path
-        except OSError:
-            continue
+        # Path.is_file() already swallows OSError, so the old try/except here
+        # was dead code.
+        if (path / "refind.conf").is_file():
+            return path
 
     return None
 

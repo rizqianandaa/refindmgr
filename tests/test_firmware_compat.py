@@ -126,6 +126,71 @@ class TestFirmwareCompat(FirmwareCompatFixture):
             self.assertTrue(data["adopted_legacy"])
             self.assertEqual(data["linux_mode"], "direct")
 
+    def test_dynamic_menu_refresh_and_restore_are_transactional(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            esp, source, target = self.make_layout(root)
+            fedora = esp / "EFI" / "fedora"
+            fedora.mkdir()
+            (fedora / "shimx64.efi").write_bytes(b"FEDORA")
+            status = compat.apply_install(compat.plan_install(source, target))
+            original = (target / "refind.conf").read_text()
+            preview = compat.refresh_menu(
+                status,
+                [("Windows", "EFI/Microsoft/Boot/bootmgfw.efi"), ("Fedora", "EFI/fedora/shimx64.efi")],
+                apply=False,
+            )
+            self.assertIn('menuentry "Fedora"', preview["content"])
+            result = compat.refresh_menu(
+                status,
+                [("Windows", "EFI/Microsoft/Boot/bootmgfw.efi"), ("Fedora", "EFI/fedora/shimx64.efi")],
+                apply=True,
+            )
+            self.assertTrue(Path(result["backup"]).is_file())
+            self.assertIn('menuentry "Fedora"', (target / "refind.conf").read_text())
+            refreshed = compat.load_status(target)
+            restored = compat.restore_menu(refreshed, apply=True)
+            self.assertTrue(Path(restored["rollback"]).is_file())
+            self.assertEqual((target / "refind.conf").read_text(), original)
+
+    def test_direct_dynamic_menu_does_not_duplicate_current_grub(self):
+        content = compat._compat_config(
+            "ubuntu", "direct", "root-uuid", "part-guid", None,
+            [("Ubuntu", "EFI/ubuntu/grubx64.efi"), ("Windows", "EFI/Microsoft/Boot/bootmgfw.efi")],
+            direct_label="Ubuntu 24.04 LTS",
+        )
+        self.assertEqual(content.count('menuentry "Ubuntu'), 1)
+        self.assertNotIn("loader /EFI/ubuntu/grubx64.efi", content)
+        self.assertIn("loader /EFI/Microsoft/Boot/bootmgfw.efi", content)
+
+    def test_reapply_known_original_loader_with_backup(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, source, target = self.make_layout(root)
+            status = compat.apply_install(compat.plan_install(source, target))
+            original = Path(status.data["original_loader_backup"]).read_bytes()
+            (target / "shimx64.efi").write_bytes(original)
+            preview = compat.reapply_loader(status, apply=False)
+            self.assertEqual(preview["state"], "original-restored")
+            result = compat.reapply_loader(status, apply=True)
+            self.assertEqual(result["state"], "reapplied")
+            self.assertEqual((target / "shimx64.efi").read_bytes(), b"REFIND-BINARY")
+            self.assertEqual(Path(result["backup"]).read_bytes(), original)
+
+    def test_reapply_unknown_loader_requires_hash_confirmation(self):
+        with TemporaryDirectory() as tmp:
+            _, source, target = self.make_layout(Path(tmp))
+            status = compat.apply_install(compat.plan_install(source, target))
+            (target / "shimx64.efi").write_bytes(b"NEW-SHIM-FROM-UPDATE")
+            preview = compat.reapply_loader(status, apply=False)
+            self.assertEqual(preview["state"], "changed")
+            with self.assertRaises(compat.FirmwareCompatError):
+                compat.reapply_loader(status, apply=True)
+            result = compat.reapply_loader(
+                status, apply=True, confirm_current_hash=preview["confirmation"]
+            )
+            self.assertEqual(result["state"], "reapplied")
+
 
 if __name__ == "__main__":
     unittest.main()

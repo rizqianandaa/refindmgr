@@ -165,6 +165,20 @@ class TestValidateThemeName(unittest.TestCase):
     def test_accepts_normal_name(self):
         themes_mod.validate_theme_name("my-cool-theme")
 
+    def test_rejects_names_with_spaces(self):
+        # 'include themes/My Theme/theme.conf' is unparseable for rEFInd (it
+        # splits on whitespace) and for conf.INCLUDE_RE, so such a theme could
+        # be installed but never deactivated or removed.
+        with self.assertRaises(themes_mod.ThemeError) as ctx:
+            themes_mod.validate_theme_name("My Theme")
+        self.assertIn("spasi", str(ctx.exception))
+        self.assertIn("My-Theme", str(ctx.exception))
+
+    def test_inferred_names_are_normalised_instead_of_rejected(self):
+        self.assertEqual(themes_mod.sanitize_theme_name("My Cool Theme"), "My-Cool-Theme")
+        self.assertEqual(themes_mod.sanitize_theme_name("  spaced  out "), "spaced-out")
+        self.assertEqual(themes_mod.sanitize_theme_name("   "), "theme")
+
 
 class TestPathTraversalProtection(unittest.TestCase):
     def test_install_rejects_traversal_name(self):

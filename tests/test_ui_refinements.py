@@ -1,5 +1,7 @@
 import argparse
+import os
 import subprocess
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -13,14 +15,24 @@ from refindmgr import cli
 
 ROOT = str(Path(__file__).resolve().parent.parent)
 
+# Pin the OS label so assertions do not depend on the host's /etc/os-release.
+_OS_RELEASE = tempfile.NamedTemporaryFile(
+    "w", suffix="-os-release", delete=False, encoding="utf-8"
+)
+_OS_RELEASE.write('ID=ubuntu\nNAME="Ubuntu"\nPRETTY_NAME="Ubuntu"\n')
+_OS_RELEASE.close()
+
 
 def run_cli(args, input_text=None):
+    env = dict(os.environ)
+    env.setdefault("REFINDMGR_OS_RELEASE", _OS_RELEASE.name)
     return subprocess.run(
         [sys.executable, "-m", "refindmgr.cli", *args],
         cwd=ROOT,
         input=input_text,
         capture_output=True,
         text=True,
+        env=env,
     )
 
 
@@ -154,7 +166,35 @@ class TestUiRefinements(unittest.TestCase):
             setup_args = setup_mock.call_args.args[0]
             self.assertTrue(setup_args.pin_version)
             self.assertTrue(setup_args.refresh_esp)
-            self.assertTrue(setup_args.allow_direct_download)
+            # The menu must never opt into the unverified SourceForge download
+            # on the user's behalf: that path installs a .deb as root whose
+            # maintainer scripts also run as root.
+            self.assertFalse(setup_args.allow_direct_download)
+            clean_mock.assert_called_once()
+
+    def test_os_only_asks_before_downgrading_and_touching_nvram(self):
+        # The only question asked used to be "Tampilkan hanya OS ini?", which
+        # says nothing about downgrading a system package or letting
+        # refind-install rewrite an NVRAM Boot#### entry.
+        with TemporaryDirectory() as tmp:
+            refind = self._refind_dir(tmp)
+            ubuntu = refind.parent / "ubuntu"
+            ubuntu.mkdir()
+            (ubuntu / "shimx64.efi").write_bytes(b"shim")
+            manager = cli.system_mod.PackageManagerInfo(
+                "apt", ["apt-get", "install", "-y", "refind"]
+            )
+            top_args = argparse.Namespace(refind_dir=str(refind))
+            answers = [True, False]  # yes to OS-only, no to the downgrade
+            with patch.object(cli, "_confirm", side_effect=answers), \
+                 patch.object(cli, "_menu_loading"), \
+                 patch.object(cli.system_mod, "detect_package_manager", return_value=manager), \
+                 patch.object(cli.system_mod, "get_installed_refind_version", return_value="0.14.2"), \
+                 patch.object(cli, "cmd_setup") as setup_mock, \
+                 patch.object(cli, "cmd_clean_menu") as clean_mock:
+                cli._menu_clean_menu_auto(top_args)
+            setup_mock.assert_not_called()
+            # Declining the downgrade must still apply the OS-only menu.
             clean_mock.assert_called_once()
 
     def test_os_only_does_not_claim_success_when_version_repair_fails(self):
@@ -181,10 +221,19 @@ class TestUiRefinements(unittest.TestCase):
 
     def test_installer_enables_showtools_compatibility_fix(self):
         installer = (Path(__file__).resolve().parent.parent / "install.sh").read_text()
-        self.assertIn(
-            "setup --yes --pin-version --refresh-esp --allow-direct-download",
-            installer,
-        )
+        self.assertIn("setup --yes --pin-version --refresh-esp", installer)
+
+    def test_installer_never_downloads_an_unverified_deb_unattended(self):
+        # install.sh runs automatically on any UEFI machine, so it must not
+        # reach the SourceForge mirror path without a checksum.
+        installer = (Path(__file__).resolve().parent.parent / "install.sh").read_text()
+        commands = [
+            line for line in installer.splitlines()
+            if "refindmgr setup" in line and not line.lstrip().startswith("#")
+        ]
+        self.assertTrue(commands)
+        for line in commands:
+            self.assertNotIn("--allow-direct-download", line)
 
     def test_official_deb_fallback_url_is_not_a_placeholder(self):
         template = cli.system_mod.REFIND_DEB_URL_TEMPLATE

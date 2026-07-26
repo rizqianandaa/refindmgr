@@ -11,8 +11,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      # Never mask one interpreter's failure behind another's success.
+      fail-fast: false
       matrix:
-        python-version: ['3.9', '3.11', '3.12']
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,6 +23,51 @@ jobs:
       - name: Install package
         run: pip install -e .
       - name: Run unit tests
+        # A non-zero exit here fails the job, so a red suite blocks the merge.
         run: python -m unittest discover -s tests -v
       - name: Smoke test installed command
         run: refindmgr --help
+      - name: Smoke test catalog without a terminal
+        # Previews must degrade to plain text when stdout is not a tty rather
+        # than emitting graphics escapes into captured output.
+        run: refindmgr catalog
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pyflakes
+      - name: Check for unused imports and dead names
+        run: python -m pyflakes refindmgr
+      - name: Shell syntax
+        run: bash -n install.sh && bash -n uninstall.sh
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install build twine
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Validate metadata
+        run: twine check dist/*
+      - name: Ensure previews and installer ship
+        run: |
+          python - <<'PY'
+          import glob, tarfile, zipfile, sys
+          sdist = tarfile.open(glob.glob("dist/*.tar.gz")[0])
+          names = {n.split("/", 1)[1] for n in sdist.getnames() if "/" in n}
+          required = {"install.sh", "uninstall.sh", "main.py", "docs/SUPPORT.md"}
+          missing = required - names
+          wheel = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
+          pngs = [n for n in wheel if n.endswith(".png")]
+          if missing or len(pngs) != 8:
+              sys.exit(f"sdist missing {missing}; wheel has {len(pngs)} PNG previews (expected 8)")
+          print("packaging OK")
+          PY

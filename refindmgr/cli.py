@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
+from contextlib import contextmanager
+import logging
 import shutil
 import os
 import sys
@@ -15,8 +16,12 @@ from . import catalog as catalog_mod
 from . import conf as conf_mod
 from . import system as system_mod
 from . import themes as themes_mod
-from . import sixel as sixel_mod
+from . import preview as preview_mod
 from . import firmware_compat as compat_mod
+from . import boot_diagnostics as bootdiag_mod
+from . import boot_recovery as recovery_mod
+from . import os_inventory as osinv_mod
+from . import app_logging as log_mod
 from . import __version__
 from .paths import detect_refind_dir, refind_conf_path
 
@@ -31,6 +36,9 @@ class CLIError(Exception):
     dimaksudkan untuk menghentikan seluruh proses Python, bukan untuk alur
     kendali di dalam satu sesi menu yang tetap berjalan.
     """
+
+
+_LOGGER = logging.getLogger("refindmgr.cli")
 
 
 def _refind_dir_arg(args: argparse.Namespace) -> Optional[str]:
@@ -92,12 +100,12 @@ def cmd_list(args: argparse.Namespace) -> None:
 
     print(f"Tema terpasang di {refind_dir / 'themes'}:\n")
     for name in installed:
-        marker = f"{_GREEN}●{_RESET} " if name == active else "  "
+        marker = f"{_GREEN}{_dot()}{_RESET} " if name == active else "  "
         print(f"{marker}{name}")
     if active is None:
         print("\n(Tidak ada tema aktif -- rEFInd memakai tampilan default.)")
     else:
-        print(f"\n({_GREEN}●{_RESET} = tema aktif saat ini: {active})")
+        print(f"\n({_GREEN}{_dot()}{_RESET} = tema aktif saat ini: {active})")
     if len(active_list) > 1:
         print(
             f"\nPERINGATAN: ditemukan {len(active_list)} baris include tema aktif sekaligus "
@@ -110,6 +118,8 @@ def cmd_catalog(args: argparse.Namespace) -> None:
     print("Katalog tema rEFInd (buka tautan Preview untuk melihat screenshot):\n")
     for index, entry in enumerate(catalog_mod.CATALOG, start=1):
         print(f"  {index}. {entry.name}  [{entry.key}]")
+        if entry.description:
+            print(f"     {entry.description}")
         print(f"     Preview: {entry.git_url}#readme")
     print("\nPasang: refindmgr install <key> --activate")
     print("Tema lain: https://refind-themes-collection.netlify.app/")
@@ -189,7 +199,10 @@ def cmd_install(args: argparse.Namespace) -> None:
                         "Sumber memiliki beberapa varian. Jalankan ulang dengan "
                         f"--variant <nama>. Pilihan: {choices}"
                     )
-                choice = input(f"Pilih varian (1-{len(variants)}): ").strip()
+                try:
+                    choice = input(f"Pilih varian (1-{len(variants)}): ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    raise CLIError("Instalasi dibatalkan.") from None
                 if not choice.isdigit() or not 1 <= int(choice) <= len(variants):
                     raise CLIError("Pilihan varian tidak valid; instalasi dibatalkan.")
                 requested_variant = variants[int(choice) - 1].key
@@ -204,6 +217,10 @@ def cmd_install(args: argparse.Namespace) -> None:
         raise CLIError(f"Gagal memasang tema: {exc}") from exc
     installed_name = installed.name
     print(f"Tema '{installed_name}' varian '{installed.variant}' berhasil dipasang di {installed.path}")
+    if getattr(installed, "commit", ""):
+        # Catalog/GitHub sources are cloned at HEAD as root onto the ESP. Show
+        # what actually landed so the install is auditable and reproducible.
+        print(f"  Commit sumber: {installed.commit}")
     for warning in installed.warnings:
         print(f"PERINGATAN: {warning}")
     if args.activate:
@@ -304,42 +321,11 @@ def cmd_variant(args: argparse.Namespace) -> None:
 # sering muncul di layar boot rEFInd, seperti dikeluhkan banyak pengguna.
 # Lihat README.md bagian 'Rapikan tampilan boot (declutter)' untuk rincian.
 MINIMAL_SHOWTOOLS = "shutdown,reboot"
-MINIMAL_SCANFOR = "internal,external,optical,manual"
-
-# Sumber "entri aneh" kedua yang sangat sering dikeluhkan (terpisah dari baris
-# tools di atas): rEFInd secara default membuat entri boot TERSENDIRI untuk
-# setiap kernel Linux mentah yang ditemukan di /boot (ikon penguin), DAN untuk
-# file loader mentah seperti grubx64.efi/fbx64.efi yang sebenarnya cuma
-# dipanggil secara internal oleh shim (ikon generik/ketupat) -- di samping
-# entri OS yang sudah benar (misalnya "ubuntu", lewat shimx64.efi). Hasilnya:
-# satu OS yang sama bisa muncul sampai 3x di baris atas dengan ikon berbeda-
-# beda, dan ini akan selalu terjadi lagi di laptop siapa pun yang memakai
-# shim+GRUB (Ubuntu, Debian, Fedora, dll.), bukan cuma kasus spesifik.
-# - scan_all_linux_kernels false: hentikan pembuatan entri terpisah per kernel
-#   mentah (ikon penguin generik).
-# - dont_scan_files: sembunyikan file loader mentah yang cuma dipakai secara
-#   internal oleh shim, di semua volume/lokasi manapun ditemukan (ikon
-#   generik/ketupat/kubus).
-MINIMAL_SCAN_ALL_LINUX_KERNELS = "false"
-# PENTING: dimulai dengan '+' supaya ini MENAMBAH ke daftar bawaan rEFInd
-# sendiri (yang sudah cukup panjang -- termasuk nama-nama file shim/MokManager
-# tertentu, lihat refind.log dengan log_level 3+), bukan MENIMPA/mengganti
-# daftar bawaan itu. Tanpa '+' di depan, nilai ini justru bisa membuka
-# kembali file yang sebelumnya disembunyikan rEFInd sendiri secara default.
-# Selain grub*/fb*/mm* (loader internal shim+GRUB), turut disembunyikan
-# bootx64.efi dkk. di folder EFI/BOOT -- loader fallback wajib-UEFI yang oleh
-# banyak distro (termasuk Ubuntu) sengaja dibuat identik/duplikat dengan
-# loader OS yang sudah punya entri sendiri, dan karena folder 'BOOT' tidak
-# cocok dengan nama ikon OS manapun, entri ini tampil dengan ikon generik
-# (kubus/ketupat) -- kandidat paling umum untuk "entri OS ke-3" yang dilihat
-# pengguna di layar boot.
-MINIMAL_DONT_SCAN_FILES = (
-    "+ "
-    "grubx64.efi,grubia32.efi,grubaa64.efi,grubarm.efi,"
-    "fbx64.efi,fbia32.efi,fbaa64.efi,"
-    "mmx64.efi,mmia32.efi,mmaa64.efi,"
-    "EFI/BOOT/bootx64.efi,EFI/BOOT/bootia32.efi,EFI/BOOT/bootaa64.efi"
-)
+# NOTE: refindmgr <=1.5.3 also defined MINIMAL_SCANFOR,
+# MINIMAL_SCAN_ALL_LINUX_KERNELS and MINIMAL_DONT_SCAN_FILES here. cmd_declutter
+# stopped writing all three (it only sets 'showtools' now), so they were dead
+# constants carrying ~40 lines of comments describing behaviour that no longer
+# exists. Removed rather than left to mislead the next reader.
 
 
 def _normalise_esp_relative_path(value: str) -> str:
@@ -365,12 +351,7 @@ def _esp_loader_path(refind_dir: Path, relative_path: str) -> Path:
     return candidate
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+from .hashing import sha256_file as _sha256
 
 
 def _dont_scan_items(lines: list) -> set[str]:
@@ -407,23 +388,6 @@ def _append_dont_scan_path(lines: list, relative_path: str) -> list:
     # '+' mempertahankan blacklist bawaan rEFInd; path penuh mencegah grubx64.efi
     # di folder distro lain ikut tersembunyi.
     return conf_mod.set_global_option(lines, "dont_scan_files", f"+ {canonical}")
-
-
-def _fallback_duplicates(refind_dir: Path, keep_path: Path) -> list[str]:
-    """Cari fallback EFI/BOOT yang byte-identik dengan loader yang dipertahankan."""
-    esp_root = system_mod.esp_root_from_refind_dir(refind_dir)
-    if esp_root is None:
-        return []
-    keep_hash = _sha256(keep_path)
-    found = []
-    for rel_path in system_mod.list_esp_loader_files(refind_dir):
-        normalised = rel_path.lower()
-        if not normalised.startswith("efi/boot/") or not normalised.endswith(".efi"):
-            continue
-        candidate = esp_root / rel_path
-        if candidate.resolve() != keep_path.resolve() and _sha256(candidate) == keep_hash:
-            found.append(rel_path)
-    return found
 
 
 def cmd_dedupe(args: argparse.Namespace) -> None:
@@ -727,39 +691,11 @@ def _parse_os_specs(specs: list[str], refind_dir: Path, lines: list) -> list[tup
 
 
 def _detect_standard_os_loaders(refind_dir: Path, lines: list) -> list[tuple[str, str]]:
-    """Deteksi loader OS standar yang aman dijadikan menu manual.
-
-    Sengaja hanya menerima path distro yang terkenal dan loader utama; shim,
-    MokManager, fbx/mmx, dan EFI/BOOT fallback tidak pernah dipilih otomatis.
-    Sistem dengan tata letak non-standar tetap bisa memakai --os manual.
-    """
-    known_linux = {
-        "ubuntu": "Ubuntu", "debian": "Debian", "fedora": "Fedora",
-        "arch": "Arch Linux", "manjaro": "Manjaro", "opensuse": "openSUSE",
-        "linuxmint": "Linux Mint", "pop_os": "Pop!_OS", "zorin": "Zorin OS",
-        "elementary": "elementary OS", "kali": "Kali Linux", "nixos": "NixOS",
-        "endeavouros": "EndeavourOS", "garuda": "Garuda Linux",
-    }
-    candidates = []
-    available = {path.lower(): path for path in system_mod.list_esp_loader_files(refind_dir)}
-    windows = "efi/microsoft/boot/bootmgfw.efi"
-    if windows in available:
-        candidates.append(("Windows", available[windows]))
-    for folder, label in known_linux.items():
-        # Prefer shim whenever present: it is the correct entry point for
-        # Secure Boot and still works when Secure Boot is disabled. Fall back
-        # across common x64/AA64/IA32 loader names without assuming one CPU.
-        choices = (
-            f"efi/{folder}/shimx64.efi", f"efi/{folder}/shimaa64.efi",
-            f"efi/{folder}/shimia32.efi", f"efi/{folder}/grubx64.efi",
-            f"efi/{folder}/grubaa64.efi", f"efi/{folder}/grubia32.efi",
-            f"efi/{folder}/systemd-bootx64.efi",
-        )
-        selected = next((available[path] for path in choices if path in available), None)
-        if selected:
-            candidates.append((label, selected))
+    """Gunakan inventory profil v1.5 lalu terapkan guard konfigurasi rEFInd."""
+    inventory = osinv_mod.build_inventory(refind_dir)
+    candidates = inventory.menu_entries()
     # Terapkan validasi yang sama seperti input manual. Aturan global lama bisa
-    # masih mengecualikan grubx64.efi; kandidat seperti itu tidak boleh dipilih.
+    # masih mengecualikan loader; kandidat seperti itu tidak boleh dipilih.
     safe = []
     try:
         own_hash = compat_mod.sha256(compat_mod.refind_binary(refind_dir))
@@ -775,8 +711,89 @@ def _detect_standard_os_loaders(refind_dir: Path, lines: list) -> list[tuple[str
             continue
         except OSError:
             continue
-        safe.append((name, relative_path))
+        # _parse_os_specs rejects empty names for manual input; the automatic
+        # path must apply the same rule, otherwise 'scanfor manual' can be
+        # written together with an entry that has no label at all.
+        clean = (name or "").strip()
+        if not clean:
+            continue
+        safe.append((clean, relative_path))
     return safe
+
+
+def cmd_os(args: argparse.Namespace) -> None:
+    """Tampilkan inventory OS/loader satu ESP tanpa mengubah apa pun."""
+    refind_dir = _resolve_refind_dir(args)
+    inventory = osinv_mod.build_inventory(refind_dir)
+    if args.action == "baseline":
+        snapshot = osinv_mod.create_baseline(refind_dir, inventory)
+        destination = Path(args.baseline_file) if getattr(args, "baseline_file", None) else None
+        print("=== Baseline kesehatan OS dan loader ===")
+        print(f"File yang akan dilacak: {len(snapshot['files'])}")
+        compat = snapshot.get("compatibility")
+        if compat:
+            print(f"Mode kompatibilitas: {compat['state']}")
+        if not args.apply:
+            print("Tidak ada perubahan. Tambahkan --apply untuk menyimpan baseline.")
+            return
+        if not system_mod.is_root() and destination is None:
+            raise CLIError("Menyimpan baseline sistem membutuhkan sudo.")
+        try:
+            saved = osinv_mod.save_baseline(snapshot, destination)
+        except (OSError, ValueError) as exc:
+            raise CLIError(f"Gagal menyimpan baseline: {exc}") from exc
+        print(f"Baseline tersimpan: {saved}")
+        return
+    runtime = inventory.runtime.pretty_name or inventory.runtime.distro_id or "tidak diketahui"
+    print("=== Inventory OS dan loader EFI ===")
+    print(f"Arsitektur firmware: {inventory.architecture}")
+    print(f"OS yang sedang berjalan: {runtime}")
+    if not inventory.loaders:
+        print("Tidak ada OS dengan profil yang didukung ditemukan pada ESP ini.")
+    for item in inventory.loaders:
+        marker = _dot() if item.current_os else "-"
+        confidence = {
+            "verified": "terverifikasi",
+            "high": "keyakinan tinggi",
+            "medium": "perlu tinjauan",
+        }.get(item.confidence, item.confidence)
+        print(f"{marker} {item.label}: /{item.path}")
+        print(f"  Jenis: {item.kind}; arsitektur: {item.architecture}; {confidence}")
+        if args.action == "doctor":
+            for evidence in item.evidence:
+                print(f"  Bukti: {evidence}")
+            for issue in item.issues:
+                print(f"  Masalah: {issue}")
+    if inventory.warnings:
+        print("Peringatan:")
+        for warning in inventory.warnings:
+            print(f"- {warning}")
+    if args.action == "doctor":
+        ok, problems = osinv_mod.health_summary(inventory)
+        print("\n=== Health check ===")
+        for item in ok:
+            print(f"[OK] {item}")
+        for item in problems:
+            print(f"[PERINGATAN] {item}")
+        baseline_file = Path(args.baseline_file) if getattr(args, "baseline_file", None) else None
+        try:
+            previous = osinv_mod.load_baseline(baseline_file)
+        except ValueError as exc:
+            print(f"[PERINGATAN] {exc}")
+            previous = None
+        print("\n=== Perubahan sejak baseline ===")
+        if previous is None:
+            print("Baseline belum tersedia. Simpan dengan: sudo refindmgr os baseline --apply")
+        else:
+            current = osinv_mod.create_baseline(refind_dir, inventory)
+            unchanged, changes = osinv_mod.compare_baseline(previous, current)
+            print(f"File tidak berubah: {len(unchanged)}")
+            if changes:
+                for change in changes:
+                    print(f"[PERUBAHAN] {change}")
+            else:
+                print("Tidak ada perubahan loader yang terdeteksi.")
+    print("\nPemeriksaan ini read-only; tidak ada file ESP atau NVRAM yang diubah.")
 
 def cmd_clean_menu(args: argparse.Namespace) -> None:
     """Buat menu OS-only dari stanza manual yang dipilih eksplisit pengguna.
@@ -792,10 +809,51 @@ def cmd_clean_menu(args: argparse.Namespace) -> None:
     except compat_mod.FirmwareCompatError as exc:
         raise CLIError(str(exc)) from exc
     if compat_status is not None:
-        raise CLIError(
-            "Menu OS mode kompatibilitas dikelola oleh manifest khusus. "
-            "clean-menu umum ditolak agar Ubuntu tidak salah diarahkan kembali ke rEFInd."
-        )
+        if not compat_status.managed:
+            raise CLIError("Mode kompatibilitas legacy harus di-adopt sebelum menu dapat diperbarui.")
+        if args.undo:
+            if args.apply and not system_mod.is_root():
+                raise CLIError("Pemulihan menu kompatibilitas membutuhkan sudo.")
+            try:
+                restored = compat_mod.restore_menu(compat_status, apply=args.apply)
+            except (OSError, compat_mod.FirmwareCompatError) as exc:
+                raise CLIError(str(exc)) from exc
+            print("=== Pemulihan menu kompatibilitas ===")
+            print(f"Backup: {restored['backup']}")
+            if not args.apply:
+                print("Tidak ada perubahan. Tambahkan --apply untuk memulihkan.")
+            else:
+                print("Menu kompatibilitas sebelumnya berhasil dipulihkan.")
+            return
+        inventory = osinv_mod.build_inventory(refind_dir)
+        if args.auto:
+            os_entries = inventory.menu_entries()
+        else:
+            conf_path = refind_conf_path(refind_dir)
+            lines = conf_mod.read_lines(conf_path)
+            os_entries = _parse_os_specs(args.os, refind_dir, lines)
+        if compat_status.data.get("linux_mode") == "direct":
+            current_paths = {item.path.casefold() for item in inventory.loaders if item.current_os}
+            os_entries = [(name, path) for name, path in os_entries if path.casefold() not in current_paths]
+        direct_label = inventory.runtime.pretty_name or "Linux"
+        try:
+            result = compat_mod.refresh_menu(
+                compat_status, os_entries, direct_label=direct_label, apply=args.apply
+            )
+        except (OSError, compat_mod.FirmwareCompatError) as exc:
+            raise CLIError(str(exc)) from exc
+        print("=== Menu OS mode kompatibilitas ===")
+        if result.get("direct_label"):
+            print(f"  - {result['direct_label']}: kernel EFI Stub langsung")
+        for name, path in result["entries"]:
+            print(f"  - {name}: /{path.lstrip('/')}")
+        if not args.apply:
+            print("Tidak ada perubahan. Tambahkan --apply untuk menerapkan.")
+        else:
+            snapshot = osinv_mod.create_baseline(refind_dir, inventory)
+            osinv_mod.save_baseline(snapshot)
+            print("Menu diperbarui dengan backup dan baseline kesehatan baru.")
+        return
     conf_path = refind_conf_path(refind_dir)
     if not conf_path.is_file():
         raise CLIError(f"refind.conf tidak ditemukan di {refind_dir}")
@@ -910,6 +968,17 @@ def cmd_restore(args: argparse.Namespace) -> None:
     print(f"refind.conf dipulihkan dari: {backup_path}")
 
 
+def _print_result_warnings(result: dict) -> None:
+    """Surface warnings that module APIs return in their result dict.
+
+    Several of these describe safety-relevant limits (an NVRAM rollback that
+    will not be byte-identical, files skipped during a restore) and used to be
+    computed and then dropped on the floor.
+    """
+    for warning in (result or {}).get("warnings") or []:
+        print(f"PERINGATAN: {warning}")
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     refind_dir = detect_refind_dir(_refind_dir_arg(args))
     print("=== Diagnostik refindmgr ===")
@@ -963,6 +1032,208 @@ def cmd_doctor(args: argparse.Namespace) -> None:
                 print(f"[{'OK' if identity_ok else 'GAGAL'}]    Identitas loader kompatibilitas")
         _print_esp_loader_audit(refind_dir)
     _print_boot_kernel_audit()
+    if getattr(args, "forensic", False) or getattr(args, "export", None) is not None:
+        try:
+            report = bootdiag_mod.collect_report(
+                scan_unmounted=getattr(args, "scan_unmounted", False),
+                allow_secure_boot=getattr(args, "allow_secure_boot", False),
+            )
+        except bootdiag_mod.DiagnosticError as exc:
+            raise CLIError(f"Diagnosis forensik gagal: {exc}") from exc
+        print()
+        print(bootdiag_mod.format_report(report))
+        export_value = getattr(args, "export", None)
+        if export_value is not None:
+            destination = None if export_value == "AUTO" else Path(export_value)
+            try:
+                archive = bootdiag_mod.export_report(report, destination)
+            except OSError as exc:
+                raise CLIError(f"Gagal membuat export diagnosis: {exc}") from exc
+            print(f"Laporan diagnosis tersensor dibuat: {archive}")
+
+
+def cmd_preflight(args: argparse.Namespace) -> None:
+    """Read-only gate before any automatic refind-install operation."""
+    try:
+        report = bootdiag_mod.collect_report(
+            scan_unmounted=getattr(args, "scan_unmounted", False),
+            allow_secure_boot=getattr(args, "allow_secure_boot", False),
+        )
+    except bootdiag_mod.DiagnosticError as exc:
+        raise CLIError(f"Preflight tidak dapat diselesaikan: {exc}") from exc
+    print(bootdiag_mod.format_report(report))
+    if not report.setup_safe:
+        message = (
+            "Preflight menghentikan setup otomatis. Tidak ada perubahan pada ESP atau NVRAM.\n"
+            "Jalankan 'sudo refindmgr doctor --forensic --scan-unmounted --export' untuk laporan lengkap."
+        )
+        if any("Secure Boot aktif" in item for item in report.ambiguities):
+            message += (
+                "\nSecure Boot aktif. Kalau kamu paham risikonya dan punya cara "
+                "memulihkan boot, ulangi dengan --allow-secure-boot."
+            )
+        raise CLIError(message)
+    print("Preflight lulus: setup otomatis boleh dilanjutkan.")
+
+
+def _print_boot_test_state(state: Optional[dict]) -> None:
+    print("=== Pengujian boot lintas-reboot ===")
+    if state is None:
+        print("Status: belum ada pengujian")
+        return
+    print(f"Fase: {state.get('phase', '-')}")
+    print(f"Target: Boot{state.get('target', '-')} {state.get('target_label', '')}")
+    print(f"BootOrder awal: {','.join(state.get('original_order') or []) or '-'}")
+    if state.get("proposed_order"):
+        print(f"BootOrder uji: {','.join(state['proposed_order'])}")
+    if state.get("firmware_behavior"):
+        print(f"Perilaku firmware: {state['firmware_behavior']}")
+    if state.get("recommendation"):
+        print(f"Rekomendasi: {state['recommendation']}")
+
+
+def cmd_boot_test(args: argparse.Namespace) -> None:
+    try:
+        if args.action == "status":
+            _print_boot_test_state(recovery_mod.load_boot_test())
+            return
+        if args.action == "start":
+            if not args.entry:
+                raise CLIError("Gunakan --entry XXXX untuk memilih entry uji.")
+            report = bootdiag_mod.collect_report(scan_unmounted=True)
+            target_file = recovery_mod.validate_boot_target(report, args.entry)
+            print(f"Loader target terverifikasi: {target_file.esp_device}:{target_file.relative_path} ({target_file.identity})")
+            if args.apply and not system_mod.is_root():
+                raise CLIError("Menulis BootNext membutuhkan sudo.")
+            state = recovery_mod.start_boot_test(args.entry, apply=args.apply)
+            _print_boot_test_state(state)
+            if not args.apply:
+                print("Tidak ada perubahan. Tambahkan --apply untuk menulis BootNext satu kali.")
+            else:
+                print("BootNext disiapkan. Setelah reboot, buka 'sudo refindmgr' untuk observasi otomatis.")
+            return
+        if args.action == "observe":
+            if not system_mod.is_root():
+                raise CLIError("Menyimpan observasi lintas-reboot membutuhkan sudo.")
+            state = recovery_mod.observe_boot_test()
+            _print_boot_test_state(state)
+            return
+        if args.action == "promote":
+            if args.apply and not system_mod.is_root():
+                raise CLIError("Menulis BootOrder membutuhkan sudo.")
+            state = recovery_mod.promote_boot_order(
+                apply=args.apply,
+                recovery_bundle=Path(args.bundle) if args.bundle else None,
+            )
+            _print_boot_test_state(state)
+            if not args.apply:
+                print("Tidak ada perubahan. Tambahkan --apply untuk menguji BootOrder permanen.")
+            else:
+                print("BootOrder uji ditulis. Setelah reboot, buka 'sudo refindmgr' untuk observasi otomatis.")
+            return
+        if args.action == "restore":
+            if args.apply and not system_mod.is_root():
+                raise CLIError("Memulihkan BootOrder membutuhkan sudo.")
+            result = recovery_mod.restore_boot_order(apply=args.apply)
+            print("BootOrder awal: " + ",".join(result.get("original_order") or []))
+            _print_result_warnings(result)
+            if result.get("restore_fallback_used"):
+                dropped = ", ".join(result.get("restore_dropped_entries") or [])
+                print(
+                    "PERINGATAN: firmware menolak BootOrder lengkap, jadi dipakai daftar "
+                    f"cadangan. Entry yang tidak dapat dipulihkan: {dropped or 'tidak diketahui'}"
+                )
+            print("Dipulihkan." if args.apply else "Tidak ada perubahan. Tambahkan --apply untuk memulihkan.")
+            return
+        if args.action == "verify-os":
+            if not args.entry or not args.label:
+                raise CLIError("verify-os membutuhkan --entry dan --label.")
+            if not system_mod.is_root():
+                raise CLIError("Menyimpan verifikasi boot membutuhkan sudo.")
+            recovery_mod.confirm_manual_boot(args.entry, args.label, args.confirm_booted or "")
+            print(f"Boot{args.entry.upper()} dicatat terverifikasi berdasarkan konfirmasi pengguna.")
+            return
+    except recovery_mod.BootRecoveryError as exc:
+        raise CLIError(str(exc)) from exc
+
+
+def cmd_recovery(args: argparse.Namespace) -> None:
+    try:
+        if args.action == "validate":
+            if not args.bundle:
+                raise CLIError("Gunakan --bundle /path/paket.zip.")
+            manifest = recovery_mod.validate_recovery_bundle(Path(args.bundle))
+            print(f"Paket recovery valid. File terverifikasi: {len(manifest.get('files', {}))}")
+            return
+        report = bootdiag_mod.collect_report(scan_unmounted=args.scan_unmounted)
+        output = Path(args.output) if args.output else Path.cwd() / f"refindmgr-recovery-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+        bundle = recovery_mod.create_recovery_bundle(
+            report, output, refind_dir=detect_refind_dir(_refind_dir_arg(args))
+        )
+        print(f"Paket recovery berhasil dibuat dan divalidasi: {bundle}")
+    except (recovery_mod.BootRecoveryError, bootdiag_mod.DiagnosticError) as exc:
+        raise CLIError(str(exc)) from exc
+
+
+def cmd_nvram_cleanup(args: argparse.Namespace) -> None:
+    try:
+        if args.action == "restore":
+            if args.apply and not system_mod.is_root():
+                raise CLIError("Memulihkan entry NVRAM membutuhkan sudo.")
+            result = recovery_mod.restore_deleted_nvram_entry(apply=args.apply)
+            _print_result_warnings(result)
+            for item in result.get("not_reproduced") or []:
+                print(f"  TIDAK dapat direproduksi: {item}")
+            if args.apply:
+                print(f"Entry dipulihkan sebagai Boot{result['new_entry']} dan BootOrder dipulihkan.")
+            else:
+                print("Pratinjau restore NVRAM:")
+                print("  " + " ".join(result["command"]))
+                print("Tidak ada perubahan. Tambahkan --apply untuk memulihkan.")
+            return
+        report = bootdiag_mod.collect_report(scan_unmounted=args.scan_unmounted)
+        classified = recovery_mod.classify_nvram_entries(report.boot, report.esps)
+        print("=== Audit cleanup NVRAM ===")
+        if not classified:
+            print("Tidak ada entry Boot#### yang dapat diklasifikasikan.")
+            return
+        for item in classified:
+            print(
+                f"- Boot{item['entry']} {item['label']}: "
+                f"[{item['classification']}] {item['reason']}"
+            )
+        if args.action == "list":
+            print("Pratinjau saja; tidak ada entry yang dihapus.")
+            return
+        if not args.entry or not args.confirm or not args.bundle:
+            raise CLIError("delete membutuhkan --entry XXXX --confirm XXXX --bundle recovery.zip.")
+        if args.apply and not system_mod.is_root():
+            raise CLIError("Menghapus entry NVRAM membutuhkan sudo.")
+        result = recovery_mod.delete_nvram_entry(
+            args.entry, args.confirm, Path(args.bundle), apply=args.apply, report=report
+        )
+        _print_result_warnings(result)
+        complete = result.get("rollback_complete", True)
+        if args.apply:
+            print(f"Boot{result['deleted']} berhasil dihapus setelah validasi paket recovery.")
+        else:
+            rollback = result["rollback"]
+            # Do not call this "terverifikasi" when efibootmgr -c cannot
+            # reproduce the entry's optional data (Windows Boot Manager's BCD
+            # argument blob, GRUB/systemd-boot arguments) or its active flag.
+            label = "Rollback terverifikasi" if complete else "Rollback SEBAGIAN"
+            print(
+                f"{label}: "
+                f"{rollback['disk']} partisi {rollback['partition']} -> {rollback['efi_path']}"
+            )
+            if not complete:
+                print(
+                    "  Entry ini punya optional data yang tidak dapat dibuat ulang oleh "
+                    "'efibootmgr -c'. Entry Windows khususnya bisa gagal boot setelah dipulihkan."
+                )
+            print("Penghapusan lolos validasi tetapi belum diterapkan. Tambahkan --apply.")
+    except (recovery_mod.BootRecoveryError, bootdiag_mod.DiagnosticError) as exc:
+        raise CLIError(str(exc)) from exc
 
 
 def _print_boot_kernel_audit() -> None:
@@ -1038,9 +1309,12 @@ def _print_manual_stanza_audit(conf_lines: list) -> None:
 
 def _print_esp_loader_audit(refind_dir: Path) -> None:
     """Cetak semua file '*.efi' lain yang ditemukan di ESP yang sama dengan
-    rEFInd (di luar folder rEFInd sendiri & EFI/tools), dan tandai mana yang
-    sudah tercakup oleh 'dont_scan_files' bawaan declutter (MINIMAL_DONT_SCAN_FILES)
-    dan mana yang belum.
+    rEFInd (di luar folder rEFInd sendiri & EFI/tools), lalu bandingkan dengan
+    aturan 'dont_scan_files' yang BENAR-BENAR ada di refind.conf saat ini.
+
+    Catatan: versi sebelumnya mengklaim membandingkan dengan daftar bawaan
+    declutter, padahal declutter sudah lama tidak menulis 'dont_scan_files'
+    sama sekali -- jadi dokumentasi itu menjanjikan perilaku yang tidak ada.
 
     Ini adalah bagian "audit" nyata yang diminta pengguna: daripada menebak
     nama file loader duplikat lewat asumsi/dokumentasi saja, tool ini melihat
@@ -1135,7 +1409,7 @@ def _ensure_refind_version_pinned(args: argparse.Namespace, manager: Optional["s
     try:
         exact_version = system_mod.pin_refind_version(manager, target=target)
     except system_mod.BootstrapError as exc:
-        if manager.name == "apt" and getattr(args, "allow_direct_download", True):
+        if manager.name == "apt" and getattr(args, "allow_direct_download", False):
             # Banyak repo apt distro (termasuk Ubuntu) hanya menyediakan rilis
             # rEFInd TERBARU, bukan versi lama seperti target di sini -- itu
             # sebabnya pin_refind_version gagal. Jalur cadangan: unduh paket
@@ -1150,7 +1424,10 @@ def _ensure_refind_version_pinned(args: argparse.Namespace, manager: Optional["s
             try:
                 with tempfile.TemporaryDirectory() as tmp_dir:
                     deb_path = os.path.join(tmp_dir, f"refind_{target}-1_amd64.deb")
-                    system_mod.download_refind_deb(target, deb_path)
+                    system_mod.download_refind_deb(
+                        target, deb_path,
+                        expected_sha256=getattr(args, "deb_sha256", None),
+                    )
                     system_mod.install_deb_file(deb_path)
             except system_mod.BootstrapError as fallback_exc:
                 print(
@@ -1231,6 +1508,19 @@ def cmd_setup(args: argparse.Namespace) -> None:
                 "dan jalur pemulihan tidak tertimpa."
             )
             return
+    # A real UEFI setup must pass the same read-only forensic gate used by
+    # install.sh.  Calling cmd_setup directly therefore cannot bypass it.
+    if refind_dir is None and Path("/sys/firmware/efi").is_dir():
+        try:
+            preflight = bootdiag_mod.collect_report(scan_unmounted=False)
+        except bootdiag_mod.DiagnosticError as exc:
+            raise CLIError(f"Preflight setup gagal: {exc}") from exc
+        if not preflight.setup_safe:
+            print(bootdiag_mod.format_report(preflight))
+            raise CLIError(
+                "Setup otomatis dihentikan karena layout boot ambigu. CLI tetap aman digunakan.\n"
+                "Jalankan 'sudo refindmgr doctor --forensic --scan-unmounted --export'."
+            )
     manager = system_mod.detect_package_manager()
 
     if refind_dir is not None:
@@ -1307,7 +1597,20 @@ def cmd_setup(args: argparse.Namespace) -> None:
 
 def _compat_status_from_args(args: argparse.Namespace):
     target = getattr(args, "target_dir", None)
-    directory = Path(target) if target else compat_mod.detect_compat_dir()
+    if target:
+        directory = Path(target)
+    else:
+        # Honour --refind-dir before falling back to the hardcoded /boot/efi,
+        # /boot, /efi scan. Without this, pointing at a rescue mount still
+        # reported and mutated the HOST's compatibility install.
+        explicit = _refind_dir_arg(args)
+        directory = None
+        if explicit:
+            candidate = Path(explicit)
+            if compat_mod.state_path(candidate).is_file() or compat_mod.legacy_state_path(candidate).is_file():
+                directory = candidate
+        if directory is None and not explicit:
+            directory = compat_mod.detect_compat_dir()
     if directory is None:
         return None
     try:
@@ -1346,6 +1649,17 @@ def _print_compat_status(status) -> None:
         print(f"Loader firmware: {status.data['active_loader']}")
     if status.data.get("original_loader_backup") or status.data.get("shim_backup"):
         print(f"Backup loader asli: {status.data.get('original_loader_backup') or status.data.get('shim_backup')}")
+    if status.managed:
+        try:
+            health = compat_mod.reapply_loader(status, apply=False)
+            labels = {
+                "healthy": "sehat",
+                "original-restored": "loader vendor dipulihkan oleh pembaruan sistem",
+                "changed": "loader berubah ke hash belum dikenal",
+            }
+            print(f"Kesehatan loader: {labels.get(health['state'], health['state'])}")
+        except (OSError, compat_mod.FirmwareCompatError) as exc:
+            print(f"Kesehatan loader: tidak dapat diverifikasi ({exc})")
 
 
 def cmd_firmware_compat(args: argparse.Namespace) -> None:
@@ -1393,6 +1707,12 @@ def cmd_firmware_compat(args: argparse.Namespace) -> None:
         except (OSError, compat_mod.FirmwareCompatError) as exc:
             raise CLIError(f"Gagal memasang mode kompatibilitas: {exc}") from exc
         print(f"Mode kompatibilitas berhasil dipasang di {installed.active_dir}.")
+        try:
+            inventory = osinv_mod.build_inventory(installed.active_dir)
+            osinv_mod.save_baseline(osinv_mod.create_baseline(installed.active_dir, inventory))
+            print("Baseline kesehatan loader awal berhasil disimpan.")
+        except OSError as exc:
+            print(f"Peringatan: baseline kesehatan belum tersimpan: {exc}")
         print("Reboot dan uji kedua OS sebelum membersihkan entry NVRAM apa pun.")
         return
 
@@ -1432,6 +1752,35 @@ def cmd_firmware_compat(args: argparse.Namespace) -> None:
         print(f"Symlink direct boot sekarang menunjuk kernel {version}.")
         return
 
+    if action == "reapply":
+        if args.apply and not system_mod.is_root():
+            raise CLIError("Reapply loader kompatibilitas membutuhkan sudo.")
+        try:
+            result = compat_mod.reapply_loader(
+                status,
+                apply=args.apply,
+                confirm_current_hash=getattr(args, "confirm_current_hash", None),
+            )
+        except (OSError, compat_mod.FirmwareCompatError) as exc:
+            raise CLIError(str(exc)) from exc
+        print("=== Penerapan ulang loader kompatibilitas ===")
+        print(f"Loader aktif: {result['active_loader']}")
+        print(f"Hash saat ini: {result['current_sha256']}")
+        print(f"Hash rEFInd yang diharapkan: {result['expected_sha256']}")
+        if result["state"] == "healthy":
+            print("Loader masih sehat; tidak ada perubahan yang diperlukan.")
+            return
+        if not args.apply:
+            print("Loader saat ini akan dibackup sebelum rEFInd diterapkan ulang.")
+            if result["state"] == "changed":
+                print(f"Hash belum dikenal; apply juga membutuhkan --confirm-current-hash {result['confirmation']}")
+            print("Tidak ada perubahan. Tambahkan --apply untuk menerapkan.")
+            return
+        inventory = osinv_mod.build_inventory(status.active_dir)
+        osinv_mod.save_baseline(osinv_mod.create_baseline(status.active_dir, inventory))
+        print(f"rEFInd berhasil diterapkan ulang. Backup loader sebelumnya: {result['backup']}")
+        return
+
     if action == "restore":
         if args.apply and not system_mod.is_root():
             raise CLIError("Pemulihan loader dan refind.conf membutuhkan sudo.")
@@ -1443,6 +1792,14 @@ def cmd_firmware_compat(args: argparse.Namespace) -> None:
         print(f"Pulihkan loader: {result['loader_backup']} -> {result['active_loader']}")
         if result.get("config_backup"):
             print(f"Pulihkan konfigurasi: {result['config_backup']}")
+        # Always show exactly what will be unlinked. An adopted legacy manifest
+        # can list arbitrary paths, so the user must see the list before, not
+        # after, anything is deleted.
+        for path in result.get("files_to_delete") or []:
+            print(f"  Hapus: {path}")
+        for path in result.get("skipped_files") or []:
+            print(f"  DILEWATI (bukan berkas kelolaan refindmgr): {path}")
+        _print_result_warnings(result)
         if not args.apply:
             print("Tidak ada perubahan. Tambahkan --apply untuk memulihkan.")
             return
@@ -1473,6 +1830,37 @@ _YELLOW = _style("\033[33m")
 _CYAN = _style("\033[36m")
 _MAGENTA = _style("\033[35m")
 
+
+def _unicode_supported(stream=None) -> bool:
+    stream = stream or sys.stdout
+    encoding = getattr(stream, "encoding", None) or ""
+    try:
+        "─❯".encode(encoding or "ascii")
+    except (LookupError, UnicodeEncodeError):
+        return False
+    return True
+
+
+# Zero-argument accessors on purpose: Python 3.9-3.11 f-strings allow neither
+# nested same-type quotes (PEP 701, 3.12+) nor backslashes in the expression
+# part, so the glyph cannot be chosen inline at the call site.
+def _dot() -> str:
+    """Active-item marker, degraded to ASCII on a LANG=C terminal."""
+    return "\u25cf" if _unicode_supported() else "*"
+
+
+def _dash() -> str:
+    """Em dash, degraded to ASCII on a LANG=C terminal."""
+    return "\u2014" if _unicode_supported() else "-"
+
+
+def _prompt_arrow() -> str:
+    return "❯" if sys.stdout.isatty() and _unicode_supported(sys.stdout) else ">"
+
+
+def _rule_character() -> str:
+    return "─" if sys.stdout.isatty() and _unicode_supported(sys.stdout) else "-"
+
 # Exact FIGlet/TAAG "Slant" output for: refindmgr
 _REFINDMGR_ASCII = (
     "               ____           __",
@@ -1487,7 +1875,10 @@ _REFINDMGR_ASCII = (
 def _prompt(label: str, default: str = "") -> str:
     suffix = f" [{default}]" if default else ""
     try:
-        value = input(f"{label}{suffix}: ").strip()
+        value = input(
+            f"{_BOLD}{label}{_RESET}{suffix} "
+            f"{_MAGENTA}{_prompt_arrow()}{_RESET} "
+        ).strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return default
@@ -1497,7 +1888,10 @@ def _prompt(label: str, default: str = "") -> str:
 def _confirm(label: str, default: bool = False) -> bool:
     hint = "Y/n" if default else "y/N"
     try:
-        value = input(f"{label} ({hint}): ").strip().lower()
+        value = input(
+            f"{_BOLD}{label}{_RESET} ({hint}) "
+            f"{_MAGENTA}{_prompt_arrow()}{_RESET} "
+        ).strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
         return default
@@ -1516,7 +1910,8 @@ def _carry(top_args: argparse.Namespace) -> dict:
 
 def _print_status_banner(top_args: argparse.Namespace) -> None:
     refind_dir = detect_refind_dir(_refind_dir_arg(top_args))
-    rule = f"{_CYAN}{'=' * 56}{_RESET}"
+    width = min(72, max(40, shutil.get_terminal_size((60, 24)).columns - 4))
+    rule = f"{_CYAN}{_rule_character() * width}{_RESET}"
     for line in _REFINDMGR_ASCII:
         print(f"{_CYAN}{_BOLD}{line}{_RESET}")
     print(f"  {_DIM}v{__version__}{_RESET}")
@@ -1562,69 +1957,143 @@ def _menu_list(top_args: argparse.Namespace) -> None:
     cmd_list(top_args)
 
 
-_CATALOG_PREVIEW_WIDTH = 160
+def _cached_preview_engine(top_args: argparse.Namespace) -> "preview_mod.PreviewEngine":
+    """Probe the terminal once per interactive session, before any menu opens."""
+    cached = getattr(top_args, "_preview_engine", None)
+    if cached is None:
+        cached = preview_mod.resolve(
+            requested=getattr(top_args, "preview", None),
+            symbols=getattr(top_args, "preview_symbols", None),
+        )
+        setattr(top_args, "_preview_engine", cached)
+    return cached
+
+
+def _cached_sixel_status(top_args: argparse.Namespace) -> tuple[str, str]:
+    """Backward-compatible view of the cached preview capability."""
+    engine = _cached_preview_engine(top_args)
+    return ("ready", "") if engine.available else ("unavailable", engine.reason)
 
 
 def _catalog_preview_path(entry) -> Optional[Path]:
-    """Return the bundled, optimized preview without network access."""
-    image = Path(__file__).resolve().parent / "assets" / "previews" / f"{entry.key}.jpg"
-    return image if image.is_file() else None
+    """Return the bundled, optimized preview without network access.
+
+    PNG is preferred because the Kitty protocol's direct transfer accepts PNG
+    only; the JPEG copy remains for the iTerm2 and character-art backends.
+    """
+    base = Path(__file__).resolve().parent / "assets" / "previews"
+    for suffix in (".png", ".jpg"):
+        image = base / f"{entry.key}{suffix}"
+        if image.is_file():
+            return image
+    return None
 
 
-def _catalog_preview_column(title: str, image_width: int) -> Optional[int]:
-    """Align every catalog image in one column, or fall back below when narrow."""
-    columns = shutil.get_terminal_size((100, 24)).columns
-    image_columns = max(1, (image_width + 7) // 8)
-    longest_title = max(
-        len(f"  {index}. {entry.name}")
+def _catalog_titles() -> list:
+    return [
+        f"  {index}. {entry.name}"
         for index, entry in enumerate(catalog_mod.CATALOG, start=1)
-    )
-    column = longest_title + 5
-    return column if column + image_columns - 1 <= columns else None
+    ]
+
+
+_GRID_TOP_ROW = 3
+
+
+def _print_catalog_list(engine) -> None:
+    """Show the whole catalog at once, as large as the terminal allows.
+
+    Entries are laid out in a grid rather than a single column: stacking eight
+    thumbnails vertically means the height budget divided by eight caps how big
+    each one can be, while most of a wide terminal sits empty. Two columns
+    halve the grid rows and roughly double the thumbnail size for free.
+    """
+    _clear_screen()
+    preview_mod.clear_graphics(engine)
+
+    titles = _catalog_titles()
+    columns, rows = preview_mod.terminal_size()
+    layout = None
+    if engine.available:
+        layout = preview_mod.grid_layout(
+            columns, rows, len(catalog_mod.CATALOG), max(len(item) for item in titles),
+            chrome_rows=_GRID_TOP_ROW + 3,
+            cell=engine.caps.cell if engine.caps else None,
+        )
+
+    if layout is None:
+        print("Katalog tema:\n")
+        if not engine.available:
+            print(f"Preview gambar tidak tersedia: {engine.reason}.\n")
+        else:
+            print("Terminal terlalu sempit untuk preview berdampingan.\n")
+        for title in titles:
+            print(title)
+        print()
+        return
+
+    print("Katalog tema:")
+    failed = ""
+    for index, (title, entry) in enumerate(zip(titles, catalog_mod.CATALOG)):
+        row_offset, column_offset = layout.position(index)
+        row = _GRID_TOP_ROW + row_offset
+        column = 1 + column_offset
+        # Absolute placement, so a cell never depends on where the previous
+        # one left the cursor and the last row cannot scroll the grid away.
+        sys.stdout.write(f"\x1b[{row};{column}H{title}")
+        sys.stdout.flush()
+        image = _catalog_preview_path(entry) if not failed else None
+        if image is None:
+            continue
+        shown, note = preview_mod.render(
+            engine, image,
+            columns=layout.box_columns, rows=layout.box_rows,
+            column=column + layout.image_offset, row=row, advance=False,
+        )
+        if not shown:
+            # Report once and fall back to plain titles; repeating the same
+            # failure eight times buries the reason.
+            failed = note
+
+    bottom = _GRID_TOP_ROW + layout.grid_rows * layout.pitch
+    sys.stdout.write(f"\x1b[{bottom};1H")
+    if failed:
+        print(f"Preview gagal: {failed}")
+    print(f"{_DIM}Preview: {preview_mod.describe(engine)}{_RESET}")
+    if preview_mod.framebuffer_viewer() is not None:
+        print(f"{_DIM}Ketik g<nomor> (mis. g2) untuk melihat gambar asli layar penuh.{_RESET}")
+    sys.stdout.flush()
 
 
 def _menu_install(top_args: argparse.Namespace) -> None:
     if _require_refind_dir(top_args) is None:
         return
-    _clear_screen()
-    print("Katalog tema:\n")
-    preview_status, preview_note = sixel_mod.detection_status()
-    preview_ready = preview_status == "ready"
-    if preview_status == "unknown":
-        print(f"Terminal tidak melaporkan kemampuan Sixel: {preview_note}.")
-        preview_ready = _confirm(
-            "img2sixel tersedia. Coba tampilkan preview Sixel?",
-            default=True,
-        )
-        if not preview_ready:
-            print("Preview dilewati. Pakai REFINDMGR_SIXEL=1 untuk mengaktifkannya otomatis.\n")
-    elif preview_status == "unavailable":
-        print(f"Preview Sixel tidak tersedia: {preview_note}.\n")
-    for index, entry in enumerate(catalog_mod.CATALOG, start=1):
-        title = f"  {index}. {entry.name}"
-        if preview_ready:
-            image = _catalog_preview_path(entry)
-            if image:
-                column = _catalog_preview_column(title, _CATALOG_PREVIEW_WIDTH)
-                if column is None:
-                    print(title)
-                    column = 5
-                else:
-                    print(title, end="", flush=True)
-                shown, note = sixel_mod.show(
-                    image,
-                    width=_CATALOG_PREVIEW_WIDTH,
-                    force=True,
-                    column=column,
-                )
-                if not shown:
-                    print(f"      Preview gagal: {note}")
-            else:
-                print(f"{title}  (preview tidak tersedia)")
-        else:
-            print(title)
-    choice = _prompt(f"Pilih nomor tema (1-{len(catalog_mod.CATALOG)})")
-    if not choice.isdigit() or not 1 <= int(choice) <= len(catalog_mod.CATALOG):
+    engine = _cached_preview_engine(top_args)
+    total = len(catalog_mod.CATALOG)
+
+    while True:
+        _print_catalog_list(engine)
+        choice = _prompt(f"Pilih nomor tema (1-{total})").strip()
+        # 'g<n>' paints the real image on the console framebuffer. No terminal
+        # protocol works on a Linux virtual console, so this is the only way to
+        # see an actual picture there rather than character art.
+        if choice[:1].lower() == "g" and choice[1:].isdigit():
+            index = int(choice[1:])
+            if not 1 <= index <= total:
+                print("Nomor tema tidak valid.")
+                continue
+            image = _catalog_preview_path(catalog_mod.CATALOG[index - 1])
+            if image is None:
+                print("Preview tidak tersedia untuk tema itu.")
+                continue
+            shown, note = preview_mod.show_fullscreen(image)
+            if not shown:
+                print(f"Tidak dapat menampilkan gambar: {note}")
+                _prompt("Tekan Enter untuk kembali", "")
+            continue
+        break
+    preview_mod.clear_graphics(engine)
+
+    if not choice.isdigit() or not 1 <= int(choice) <= total:
         print("Dibatalkan: nomor tema tidak valid.")
         return
     entry = catalog_mod.CATALOG[int(choice) - 1]
@@ -1638,7 +2107,7 @@ def _menu_install(top_args: argparse.Namespace) -> None:
             print("Dibatalkan: nomor varian tidak valid.")
             return
         variant_name, subdir = entry.variants[int(variant_choice) - 1]
-        entry_label = f"{entry.name} — {variant_name}"
+        entry_label = f"{entry.name} {_dash()} {variant_name}"
     else:
         entry_label = entry.name
     if not _confirm(f"Pasang tema '{entry_label}'?", default=True):
@@ -1653,8 +2122,8 @@ def _menu_install(top_args: argparse.Namespace) -> None:
             return
         color_variant = {"1": "main", "2": "moon", "3": "dawn"}[color_choice]
     ns = argparse.Namespace(source=entry.key, name=(None if subdir else entry.install_name), subdir=subdir, variant=None, color_variant=color_variant, activate=True, **_carry(top_args))
-    _menu_loading("Memasang")
-    cmd_install(ns)
+    with _menu_loading("Memasang"):
+        cmd_install(ns)
 
 
 
@@ -1669,8 +2138,8 @@ def _menu_install_source(top_args: argparse.Namespace) -> None:
     if not _confirm("Pasang dan aktifkan tema dari sumber ini?", default=True):
         print("Dibatalkan.")
         return
-    _menu_loading("Memasang")
-    cmd_install(argparse.Namespace(source=source, name=name, subdir=None, color_variant="main", activate=True, **_carry(top_args)))
+    with _menu_loading("Memasang"):
+        cmd_install(argparse.Namespace(source=source, name=name, subdir=None, color_variant="main", activate=True, **_carry(top_args)))
 
 def _menu_activate(top_args: argparse.Namespace) -> None:
     refind_dir = _require_refind_dir(top_args)
@@ -1683,15 +2152,15 @@ def _menu_activate(top_args: argparse.Namespace) -> None:
     active = conf_mod.get_active_theme(conf_mod.read_lines(refind_conf_path(refind_dir)))
     print("Pilih tema yang diaktifkan:")
     for index, name in enumerate(installed, start=1):
-        active_note = f" {_GREEN}● aktif{_RESET}" if name == active else ""
+        active_note = f" {_GREEN}{_dot()} aktif{_RESET}" if name == active else ""
         print(f"  {index}) {name}{active_note}")
     choice = _prompt(f"Pilih nomor tema (1-{len(installed)})")
     if not choice.isdigit() or not 1 <= int(choice) <= len(installed):
         print("Dibatalkan: nomor tema tidak valid.")
         return
     name = installed[int(choice) - 1]
-    _menu_loading("Mengaktifkan")
-    cmd_activate(argparse.Namespace(name=name, **_carry(top_args)))
+    with _menu_loading("Mengaktifkan"):
+        cmd_activate(argparse.Namespace(name=name, **_carry(top_args)))
 
 
 def _menu_deactivate(top_args: argparse.Namespace) -> None:
@@ -1700,8 +2169,8 @@ def _menu_deactivate(top_args: argparse.Namespace) -> None:
     if not _confirm("Nonaktifkan semua tema (kembali ke tampilan default rEFInd)?"):
         print("Dibatalkan.")
         return
-    _menu_loading("Menonaktifkan")
-    cmd_deactivate(argparse.Namespace(**_carry(top_args)))
+    with _menu_loading("Menonaktifkan"):
+        cmd_deactivate(argparse.Namespace(**_carry(top_args)))
 
 
 def _menu_remove(top_args: argparse.Namespace) -> None:
@@ -1723,8 +2192,8 @@ def _menu_remove(top_args: argparse.Namespace) -> None:
     if not _confirm(f"Hapus tema '{name}'?", default=False):
         print("Dibatalkan.")
         return
-    _menu_loading("Menghapus")
-    cmd_remove(argparse.Namespace(name=name, **_carry(top_args)))
+    with _menu_loading("Menghapus"):
+        cmd_remove(argparse.Namespace(name=name, **_carry(top_args)))
 
 
 def _menu_variant(top_args: argparse.Namespace) -> None:
@@ -1776,13 +2245,34 @@ def _menu_declutter_undo(top_args: argparse.Namespace) -> None:
 
 
 
-def _menu_loading(action: str = "Menerapkan") -> None:
-    """Jeda singkat setelah konfirmasi agar aksi menu terasa jelas, tanpa berlebihan."""
-    print(f"\n{action}", end="", flush=True)
-    for _ in range(3):
-        time.sleep(0.25)
-        print(".", end="", flush=True)
-    print()
+@contextmanager
+def _menu_loading(action: str = "Menerapkan"):
+    """Spinner ringan hanya selama operasi berjalan, tanpa mengubah layout lain."""
+    if not sys.stdout.isatty():
+        print(f"\n{action}...")
+        yield
+        return
+    try:
+        from rich.console import Console
+    except ImportError:
+        print(f"\n{action}...", flush=True)
+        yield
+        return
+    console = Console(file=sys.stdout, no_color=bool(os.environ.get("NO_COLOR")))
+    with console.status(f"[cyan]{action}...[/cyan]", spinner="dots"):
+        yield
+
+
+def _refind_version_at_least(version: str, minimum: str) -> bool:
+    """Compare package versions without letting a junk string crash the menu.
+
+    version_tuple raises on values such as 'unknown' or '(none)', which some
+    package managers do emit.
+    """
+    try:
+        return system_mod.version_tuple(version) >= system_mod.version_tuple(minimum)
+    except system_mod.BootstrapError:
+        return False
 
 
 def _menu_clean_menu_auto(top_args: argparse.Namespace) -> None:
@@ -1806,32 +2296,46 @@ def _menu_clean_menu_auto(top_args: argparse.Namespace) -> None:
     installed_version = (
         system_mod.get_installed_refind_version(manager) if manager is not None else None
     )
-    if (
-        installed_version is not None
-        and system_mod.version_tuple(installed_version) >= system_mod.version_tuple("0.14.2")
-    ):
+    if installed_version is not None and _refind_version_at_least(installed_version, "0.14.2"):
         print(
             f"\nrEFInd {installed_version} terdeteksi. Versi 0.14.2+ memiliki bug upstream "
             "yang membuat 'showtools' diabaikan, sehingga semua tombol tetap tampil.\n"
-            f"refindmgr akan menyesuaikannya ke {system_mod.TARGET_REFIND_VERSION} dan "
-            "menyegarkan binari rEFInd di partisi EFI terlebih dahulu."
+            f"refindmgr bisa menurunkannya ke {system_mod.TARGET_REFIND_VERSION} dan "
+            "menyegarkan binari rEFInd di partisi EFI."
         )
+        # Spell out every consequence. The only confirmation given so far was
+        # "Tampilkan hanya OS ini?", which says nothing about downgrading a
+        # system package or letting refind-install rewrite an NVRAM entry.
+        print(
+            "  Yang akan dijalankan:\n"
+            f"    1. Menurunkan paket sistem rEFInd ke {system_mod.TARGET_REFIND_VERSION} lewat package manager.\n"
+            "    2. Menjalankan 'refind-install', yang MENULIS ke partisi EFI dan\n"
+            "       membuat/mengurutkan ulang entri boot Boot#### di NVRAM."
+        )
+        if not _confirm(
+            "Lanjutkan downgrade paket rEFInd dan tulis ulang ESP/NVRAM?", default=False
+        ):
+            print("Dilewati: versi rEFInd dan ESP/NVRAM dibiarkan apa adanya.")
+            print("Menu OS-only tetap dilanjutkan, tapi 'showtools' mungkin diabaikan rEFInd.")
+            _apply_os_only_menu(top_args)
+            return
         cmd_setup(argparse.Namespace(
             yes=True, pin_version=True, refresh_esp=True,
-            allow_direct_download=True, target_version=None, **_carry(top_args)
+            allow_direct_download=False, deb_sha256=None, target_version=None, **_carry(top_args)
         ))
         repaired_version = system_mod.get_installed_refind_version(manager)
-        if (
-            repaired_version is None
-            or system_mod.version_tuple(repaired_version) >= system_mod.version_tuple("0.14.2")
-        ):
+        if repaired_version is None or _refind_version_at_least(repaired_version, "0.14.2"):
             print(
                 "Mode OS saja dibatalkan karena versi rEFInd yang terkena bug 'showtools' "
                 "belum berhasil diperbaiki. Tidak ada konfigurasi menu yang diterapkan."
             )
             return
-    _menu_loading()
-    cmd_clean_menu(argparse.Namespace(os=[], auto=True, apply=True, undo=False, **_carry(top_args)))
+    _apply_os_only_menu(top_args)
+
+
+def _apply_os_only_menu(top_args: argparse.Namespace) -> None:
+    with _menu_loading():
+        cmd_clean_menu(argparse.Namespace(os=[], auto=True, apply=True, undo=False, **_carry(top_args)))
 
 
 def _menu_clean_menu_undo(top_args: argparse.Namespace) -> None:
@@ -1840,14 +2344,14 @@ def _menu_clean_menu_undo(top_args: argparse.Namespace) -> None:
     if not _confirm("Batalkan mode OS saja dan pulihkan menu sebelumnya?", default=False):
         print("Dibatalkan.")
         return
-    _menu_loading()
-    cmd_clean_menu(argparse.Namespace(os=[], auto=False, apply=False, undo=True, **_carry(top_args)))
+    with _menu_loading():
+        cmd_clean_menu(argparse.Namespace(os=[], auto=False, apply=False, undo=True, **_carry(top_args)))
 
 def _menu_backup(top_args: argparse.Namespace) -> None:
     if _require_refind_dir(top_args) is None:
         return
-    _menu_loading("Membuat backup")
-    cmd_backup(argparse.Namespace(**_carry(top_args)))
+    with _menu_loading("Membuat backup"):
+        cmd_backup(argparse.Namespace(**_carry(top_args)))
 
 
 def _menu_restore(top_args: argparse.Namespace) -> None:
@@ -1869,8 +2373,8 @@ def _menu_restore(top_args: argparse.Namespace) -> None:
     else:
         print(f"{_RED}Input tidak valid: '{choice}'. Masukkan angka 1-{len(backups)} atau kosongkan.{_RESET}")
         return
-    _menu_loading("Memulihkan")
-    cmd_restore(argparse.Namespace(backup=backup, **_carry(top_args)))
+    with _menu_loading("Memulihkan"):
+        cmd_restore(argparse.Namespace(backup=backup, **_carry(top_args)))
 
 
 def _menu_doctor(top_args: argparse.Namespace) -> None:
@@ -1880,11 +2384,16 @@ def _menu_doctor(top_args: argparse.Namespace) -> None:
 def _menu_setup(top_args: argparse.Namespace) -> None:
     yes = _confirm("Jalankan instalasi rEFInd sekarang (bukan hanya pratinjau)?")
     if yes:
-        _menu_loading("Menyiapkan")
-    cmd_setup(argparse.Namespace(
-        yes=yes, pin_version=True, refresh_esp=True,
-        allow_direct_download=True, target_version=None, **_carry(top_args)
-    ))
+        with _menu_loading("Menyiapkan"):
+            cmd_setup(argparse.Namespace(
+                yes=yes, pin_version=True, refresh_esp=True,
+                allow_direct_download=True, target_version=None, **_carry(top_args)
+            ))
+    else:
+        cmd_setup(argparse.Namespace(
+            yes=False, pin_version=True, refresh_esp=True,
+            allow_direct_download=True, target_version=None, **_carry(top_args)
+        ))
 
 
 def _menu_firmware_compat(top_args: argparse.Namespace) -> None:
@@ -1915,25 +2424,86 @@ def _menu_firmware_compat(top_args: argparse.Namespace) -> None:
             allow_unknown_secure_boot=False, **_carry(top_args),
         ))
         return
-    print("  1) Refresh symlink kernel direct")
-    print("  2) Pulihkan boot standar")
+    print("  1) Perbarui daftar OS otomatis")
+    print("  2) Refresh symlink kernel direct")
+    print("  3) Terapkan ulang rEFInd setelah pembaruan sistem")
+    print("  4) Pulihkan boot standar")
     print("  0) Kembali")
     choice = _prompt("Pilih aksi", "0")
     if choice == "1":
+        cmd_clean_menu(argparse.Namespace(
+            auto=True, os=[], undo=False, apply=True, **_carry(top_args),
+        ))
+    elif choice == "2":
         cmd_firmware_compat(argparse.Namespace(
             action="refresh-kernel", target_dir=str(status.active_dir), apply=True,
             source_dir=None, vendor="ubuntu", direct_linux=False,
-            allow_unknown_secure_boot=False, **_carry(top_args),
+            allow_unknown_secure_boot=False, confirm_current_hash=None, **_carry(top_args),
         ))
-    elif choice == "2":
+    elif choice == "3":
+        preview_args = argparse.Namespace(
+            action="reapply", target_dir=str(status.active_dir), apply=False,
+            source_dir=None, vendor="ubuntu", direct_linux=False,
+            allow_unknown_secure_boot=False, confirm_current_hash=None, **_carry(top_args),
+        )
+        cmd_firmware_compat(preview_args)
+        # reapply_loader raises FirmwareCompatError (a RuntimeError), which the
+        # cmd_* wrapper converts to CLIError but this direct call does not.
+        try:
+            health = compat_mod.reapply_loader(status, apply=False)
+        except compat_mod.FirmwareCompatError as exc:
+            raise CLIError(f"Mode kompatibilitas firmware: {exc}") from exc
+        if health["state"] != "healthy" and _confirm("Terapkan ulang setelah backup otomatis?", default=False):
+            cmd_firmware_compat(argparse.Namespace(
+                **{**vars(preview_args), "apply": True,
+                   "confirm_current_hash": health["confirmation"] if health["state"] == "changed" else None}
+            ))
+    elif choice == "4":
         if not _confirm("Pulihkan shim dan refind.conf asli dari backup manifest?", default=False):
             print("Dibatalkan.")
             return
         cmd_firmware_compat(argparse.Namespace(
             action="restore", target_dir=str(status.active_dir), apply=True,
             source_dir=None, vendor="ubuntu", direct_linux=False,
-            allow_unknown_secure_boot=False, **_carry(top_args),
+            allow_unknown_secure_boot=False, confirm_current_hash=None, **_carry(top_args),
         ))
+
+
+def _menu_boot_diagnostics(top_args: argparse.Namespace) -> None:
+    cmd_doctor(argparse.Namespace(
+        forensic=True, scan_unmounted=True, export=None, **_carry(top_args)
+    ))
+
+
+def _menu_boot_recovery(top_args: argparse.Namespace) -> None:
+    print("  1) Status pengujian BootOrder")
+    print("  2) Mulai uji BootNext")
+    print("  3) Observasi setelah reboot")
+    print("  4) Promosikan ke uji BootOrder")
+    print("  5) Pulihkan BootOrder awal")
+    print("  6) Buat paket recovery")
+    print("  7) Pratinjau cleanup NVRAM")
+    print("  0) Kembali")
+    choice = _prompt("Pilih aksi", "0")
+    if choice == "1":
+        cmd_boot_test(argparse.Namespace(action="status", entry=None, label=None, confirm_booted=None, bundle=None, apply=False))
+    elif choice == "2":
+        entry = _prompt("Entry target, mis. 000A")
+        apply = _confirm("Tulis BootNext untuk satu kali reboot?", default=False)
+        cmd_boot_test(argparse.Namespace(action="start", entry=entry, label=None, confirm_booted=None, bundle=None, apply=apply))
+    elif choice == "3":
+        cmd_boot_test(argparse.Namespace(action="observe", entry=None, label=None, confirm_booted=None, bundle=None, apply=False))
+    elif choice == "4":
+        bundle = _prompt("Path paket recovery tervalidasi")
+        apply = _confirm("Uji BootOrder permanen setelah BootNext lulus?", default=False)
+        cmd_boot_test(argparse.Namespace(action="promote", entry=None, label=None, confirm_booted=None, bundle=bundle or None, apply=apply))
+    elif choice == "5":
+        apply = _confirm("Pulihkan BootOrder awal?", default=False)
+        cmd_boot_test(argparse.Namespace(action="restore", entry=None, label=None, confirm_booted=None, bundle=None, apply=apply))
+    elif choice == "6":
+        cmd_recovery(argparse.Namespace(action="create", bundle=None, output=None, scan_unmounted=True, **_carry(top_args)))
+    elif choice == "7":
+        cmd_nvram_cleanup(argparse.Namespace(action="list", entry=None, confirm=None, bundle=None, apply=False, scan_unmounted=True))
 
 
 _MENU_SECTIONS = [
@@ -1952,6 +2522,8 @@ _MENU_SECTIONS = [
         ("12", "Diagnostik (doctor)", _menu_doctor),
         ("13", "Pasang rEFInd itu sendiri (setup)", _menu_setup),
         ("14", "Mode kompatibilitas firmware", _menu_firmware_compat),
+        ("15", "Diagnosis forensik multi-ESP", _menu_boot_diagnostics),
+        ("16", "Pengujian & pemulihan boot", _menu_boot_recovery),
     ]),
 ]
 
@@ -1966,15 +2538,38 @@ def _clear_screen() -> None:
     berguna di luar terminal interaktif sungguhan.
     """
     if sys.stdout.isatty():
-        os.system("cls" if os.name == "nt" else "clear")
+        # os.system spawns a shell as root and resolves 'clear' through the
+        # inherited PATH.  The escape sequence does the same job with no
+        # subprocess: home cursor, erase screen, erase scrollback.
+        sys.stdout.write("\x1b[H\x1b[2J\x1b[3J")
+        sys.stdout.flush()
 
 
 def run_interactive_menu(top_args: argparse.Namespace) -> None:
     """Menu CLI interaktif -- dipanggil otomatis saat 'refindmgr' dijalankan tanpa subcommand."""
+    # Capability detection is intentionally performed once at startup. Menu 2
+    # consumes this cached result and never interrupts the user with y/n.
+    _cached_preview_engine(top_args)
+    resumed_boot_state = None
+    resume_error = None
+    if system_mod.is_root():
+        try:
+            resumed_boot_state = recovery_mod.auto_observe_boot_test()
+        except recovery_mod.BootRecoveryError as exc:
+            resume_error = str(exc)
     while True:
         _clear_screen()
         print()
         _print_status_banner(top_args)
+        if resumed_boot_state is not None:
+            print()
+            print(f"{_GREEN}Boot test dilanjutkan otomatis setelah reboot.{_RESET}")
+            _print_boot_test_state(resumed_boot_state)
+            resumed_boot_state = None
+        elif resume_error is not None:
+            print()
+            print(f"{_YELLOW}Boot test belum dapat diamati otomatis: {resume_error}{_RESET}")
+            resume_error = None
         print()
         for section, items in _MENU_SECTIONS:
             print(f"{_BOLD}{section}{_RESET}")
@@ -1983,7 +2578,10 @@ def run_interactive_menu(top_args: argparse.Namespace) -> None:
             print()
         print(f"  {_CYAN}0){_RESET} Keluar\n")
         try:
-            choice = input(f"{_BOLD}Pilih menu >{_RESET} ").strip()
+            choice = input(
+                f"{_BOLD}Pilih menu{_RESET} "
+                f"{_MAGENTA}{_BOLD}{_prompt_arrow()}{_RESET} "
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             print("Sampai jumpa!")
@@ -2001,15 +2599,40 @@ def run_interactive_menu(top_args: argparse.Namespace) -> None:
         try:
             handler(top_args)
         except CLIError as exc:
+            _LOGGER.exception("Operasi menu gagal: %s", exc)
             print(f"{_RED}{exc}{_RESET}", file=sys.stderr)
         except PermissionError as exc:
+            _LOGGER.exception("Akses menu ditolak: %s", exc)
             print(
                 f"{_RED}Akses ditolak: {exc}{_RESET}\n"
                 "Perintah ini butuh akses root karena menyentuh partisi EFI. Coba ulangi dengan sudo.",
                 file=sys.stderr,
             )
         except OSError as exc:
+            _LOGGER.exception("Kesalahan sistem pada menu: %s", exc)
             print(f"{_RED}Terjadi kesalahan sistem: {exc}{_RESET}", file=sys.stderr)
+        except KeyboardInterrupt:
+            print()
+            print(f"{_DIM}Operasi dibatalkan.{_RESET}")
+        except (
+            bootdiag_mod.DiagnosticError,
+            recovery_mod.BootRecoveryError,
+            compat_mod.FirmwareCompatError,
+            themes_mod.ThemeError,
+            system_mod.BootstrapError,
+        ) as exc:
+            # These reach the loop when a menu handler calls a module API
+            # directly instead of going through its cmd_* wrapper. They used to
+            # escape as a traceback and take the whole interactive session down.
+            _LOGGER.exception("Operasi menu gagal: %s", exc)
+            print(f"{_RED}{exc}{_RESET}", file=sys.stderr)
+        except ValueError as exc:
+            _LOGGER.exception("Data sistem tidak terduga pada menu: %s", exc)
+            print(
+                f"{_RED}Data dari sistem tidak dapat dibaca: {exc}{_RESET}\n"
+                "Jalankan 'sudo refindmgr doctor --forensic --export' dan sertakan hasilnya bila melapor.",
+                file=sys.stderr,
+            )
         print()
         try:
             input(f"{_DIM}Tekan Enter untuk kembali ke menu...{_RESET}")
@@ -2037,6 +2660,28 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common],
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--preview",
+        choices=["auto", "kitty", "iterm", "sixel", "framebuffer", "chafa", "none"],
+        default="auto",
+        help=(
+            "Backend preview katalog. 'auto' memprobe terminal dan memilih "
+            "Kitty > iTerm2 > Sixel > framebuffer > chafa. 'framebuffer' menulis "
+            "piksel langsung ke /dev/fb0 dan hanya dipakai di konsol Linux. "
+            "Bisa juga lewat REFINDMGR_PREVIEW."
+        ),
+    )
+    parser.add_argument(
+        "--preview-symbols",
+        choices=["auto", "unicode", "ascii"],
+        default="auto",
+        help=(
+            "Karakter untuk preview mode chafa. 'auto' memakai ASCII di konsol "
+            "berfont tetap (TERM=linux) dan blok Unicode di terminal lain. "
+            "Pakai 'unicode' kalau font konsolmu sebenarnya punya glyph blok. "
+            "Bisa juga lewat REFINDMGR_PREVIEW_SYMBOLS."
+        ),
+    )
     sub = parser.add_subparsers(dest="command", required=False)
 
     p_list = sub.add_parser("list", help="Tampilkan tema yang terpasang dan yang aktif.", parents=[common])
@@ -2117,6 +2762,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean_menu.add_argument("--undo", action="store_true", help="Pulihkan mode scanfor sebelum clean-menu diterapkan.")
     p_clean_menu.set_defaults(func=cmd_clean_menu)
 
+    p_os = sub.add_parser(
+        "os",
+        help="Lihat inventory OS/loader EFI atau jalankan health check read-only.",
+        parents=[common],
+    )
+    p_os.add_argument("action", nargs="?", default="list", choices=("list", "doctor", "baseline"))
+    p_os.add_argument("--apply", action="store_true", help="Simpan baseline kesehatan loader; default pratinjau.")
+    p_os.add_argument("--baseline-file", help="Path baseline alternatif untuk pengujian atau audit.")
+    p_os.set_defaults(func=cmd_os)
+
     p_backup = sub.add_parser("backup", help="Buat backup refind.conf saat ini.", parents=[common])
     p_backup.set_defaults(func=cmd_backup)
 
@@ -2130,7 +2785,68 @@ def build_parser() -> argparse.ArgumentParser:
         help="Diagnostik: cek folder rEFInd, refind.conf, git, dan akses root.",
         parents=[common],
     )
+    p_doctor.add_argument("--forensic", action="store_true", help="Analisis read-only seluruh ESP terdeteksi dan rantai BootCurrent.")
+    p_doctor.add_argument("--scan-unmounted", action="store_true", help="Mount ESP tambahan sementara secara read-only (butuh root).")
+    p_doctor.add_argument("--export", nargs="?", const="AUTO", metavar="ZIP", help="Buat ZIP laporan tersensor; path opsional.")
     p_doctor.set_defaults(func=cmd_doctor)
+
+    p_preflight = sub.add_parser(
+        "preflight",
+        help="Periksa apakah layout boot cukup jelas untuk setup otomatis (read-only).",
+        parents=[common],
+    )
+    p_preflight.add_argument(
+        "--setup", action="store_true",
+        help=argparse.SUPPRESS,  # Diterima untuk kompatibilitas installer lama; tidak berpengaruh.
+    )
+    p_preflight.add_argument(
+        "--allow-secure-boot",
+        action="store_true",
+        help=(
+            "Lanjutkan walau Secure Boot aktif. Tanpa flag ini setup otomatis "
+            "sengaja dihentikan, karena rEFInd yang tidak ditandatangani bisa "
+            "membuat mesin gagal boot."
+        ),
+    )
+    p_preflight.add_argument("--scan-unmounted", action="store_true", help="Mount ESP tambahan sementara secara read-only (butuh root).")
+    p_preflight.set_defaults(func=cmd_preflight)
+
+    p_boot_test = sub.add_parser(
+        "boot-test",
+        help="Uji BootNext dan BootOrder bertahap dengan state lintas-reboot.",
+        parents=[common],
+    )
+    p_boot_test.add_argument("action", choices=("status", "start", "observe", "promote", "restore", "verify-os"))
+    p_boot_test.add_argument("--entry", help="Nomor Boot#### target, mis. 000A.")
+    p_boot_test.add_argument("--label", help="Label OS untuk verify-os.")
+    p_boot_test.add_argument("--confirm-booted", help="Konfirmasi manual persis BOOT-BERHASIL.")
+    p_boot_test.add_argument("--bundle", help="Paket recovery tervalidasi, wajib untuk promote --apply.")
+    p_boot_test.add_argument("--apply", action="store_true", help="Terapkan perubahan NVRAM; default pratinjau.")
+    p_boot_test.set_defaults(func=cmd_boot_test)
+
+    p_recovery = sub.add_parser(
+        "recovery",
+        help="Buat atau validasi paket pemulihan boot.",
+        parents=[common],
+    )
+    p_recovery.add_argument("action", choices=("create", "validate"))
+    p_recovery.add_argument("--output", help="Path ZIP tujuan untuk create.")
+    p_recovery.add_argument("--bundle", help="Path ZIP untuk validate.")
+    p_recovery.add_argument("--scan-unmounted", action="store_true", help="Periksa ESP tambahan read-only.")
+    p_recovery.set_defaults(func=cmd_recovery)
+
+    p_cleanup = sub.add_parser(
+        "nvram-cleanup",
+        help="Pratinjau atau hapus satu entry NVRAM terverifikasi.",
+        parents=[common],
+    )
+    p_cleanup.add_argument("action", choices=("list", "delete", "restore"))
+    p_cleanup.add_argument("--entry", help="Boot#### yang akan dihapus.")
+    p_cleanup.add_argument("--confirm", help="Konfirmasi persis empat digit entry.")
+    p_cleanup.add_argument("--bundle", help="Paket recovery tervalidasi yang wajib tersedia.")
+    p_cleanup.add_argument("--apply", action="store_true", help="Benar-benar hapus satu entry; default pratinjau.")
+    p_cleanup.add_argument("--scan-unmounted", action="store_true", help="Periksa ESP tambahan read-only.")
+    p_cleanup.set_defaults(func=cmd_nvram_cleanup)
 
     p_setup = sub.add_parser(
         "setup",
@@ -2144,7 +2860,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_setup.add_argument("--pin-version", action="store_true", help="Sesuaikan versi paket rEFInd secara eksplisit; default-nya tidak mengubah versi.")
     p_setup.add_argument("--target-version", help=f"Versi target bersama --pin-version (default: {system_mod.TARGET_REFIND_VERSION}).")
-    p_setup.add_argument("--allow-direct-download", action="store_true", help="Izinkan fallback paket resmi langsung bila repo distro tidak punya versi target.")
+    p_setup.add_argument(
+        "--allow-direct-download", action="store_true",
+        help=(
+            "Izinkan fallback unduh paket .deb resmi bila repo distro tidak punya versi target. "
+            "Wajib disertai --deb-sha256."
+        ),
+    )
+    p_setup.add_argument(
+        "--deb-sha256", default=None,
+        help=(
+            "Checksum SHA-256 paket .deb yang diharapkan. Wajib untuk "
+            "--allow-direct-download karena SourceForge mengarahkan ke mirror komunitas "
+            "yang isinya tidak terverifikasi."
+        ),
+    )
     p_setup.add_argument("--refresh-esp", action="store_true", help="Jalankan refind-install ulang pada instalasi yang sudah ada.")
     p_setup.set_defaults(func=cmd_setup)
 
@@ -2155,13 +2885,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_compat.add_argument(
         "action",
-        choices=("status", "enable", "adopt", "refresh-kernel", "restore"),
+        choices=("status", "enable", "adopt", "refresh-kernel", "reapply", "restore"),
     )
     p_compat.add_argument("--source-dir", help="Folder rEFInd dedicated, mis. /boot/efi/EFI/refind.")
     p_compat.add_argument("--target-dir", help="Folder vendor yang diprioritaskan firmware, mis. /boot/efi/EFI/ubuntu.")
     p_compat.add_argument("--vendor", default="ubuntu", help="Nama folder vendor target (default: ubuntu).")
     p_compat.add_argument("--direct-linux", action="store_true", help="Boot kernel Linux langsung via EFI Stub, tanpa GRUB terlihat.")
     p_compat.add_argument("--apply", action="store_true", help="Terapkan perubahan; default hanya pratinjau/status.")
+    p_compat.add_argument("--confirm-current-hash", help="Konfirmasi 12 karakter awal hash loader berubah untuk reapply.")
     p_compat.add_argument(
         "--allow-unknown-secure-boot",
         action="store_true",
@@ -2175,23 +2906,36 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    log_path = log_mod.configure()
+    command = getattr(args, "command", None) or "interactive"
+    _LOGGER.info("Mulai refindmgr version=%s command=%s", __version__, command)
     try:
         if getattr(args, "command", None) is None:
             run_interactive_menu(args)
         else:
             args.func(args)
+        _LOGGER.info("Selesai command=%s", command)
     except CLIError as exc:
+        _LOGGER.exception("Perintah gagal command=%s error=%s", command, exc)
         print(str(exc), file=sys.stderr)
+        if log_path is not None:
+            print(f"Detail teknis: {log_path}", file=sys.stderr)
         sys.exit(1)
     except PermissionError as exc:
+        _LOGGER.exception("Akses ditolak command=%s error=%s", command, exc)
         print(
             f"Akses ditolak: {exc}\n"
             "Perintah ini butuh akses root karena menyentuh partisi EFI. Coba jalankan lagi dengan sudo.",
             file=sys.stderr,
         )
+        if log_path is not None:
+            print(f"Detail teknis: {log_path}", file=sys.stderr)
         sys.exit(1)
     except OSError as exc:
+        _LOGGER.exception("Kesalahan sistem command=%s error=%s", command, exc)
         print(f"Terjadi kesalahan sistem: {exc}", file=sys.stderr)
+        if log_path is not None:
+            print(f"Detail teknis: {log_path}", file=sys.stderr)
         sys.exit(1)
 
 

@@ -1,6 +1,8 @@
 import argparse
 import io
+import os
 import subprocess
+import tempfile
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -15,12 +17,41 @@ from refindmgr import cli as cli_mod
 from refindmgr import system as system_mod
 
 
-def run_cli(args, cwd):
+# Pinned so the OS label under test never depends on the machine running the
+# suite. Without this, /etc/os-release on a developer box turns 'Ubuntu' into
+# 'Ubuntu 24.04.4 LTS' and the assertions below fail for the wrong reason.
+FIXTURE_OS_RELEASE = 'ID=ubuntu\nNAME="Ubuntu"\nPRETTY_NAME="Ubuntu"\n'
+
+
+def cli_env(**extra):
+    env = dict(os.environ)
+    env.setdefault("REFINDMGR_OS_RELEASE", _os_release_fixture())
+    env.update(extra)
+    return env
+
+
+_OS_RELEASE_FIXTURE_PATH = None
+
+
+def _os_release_fixture() -> str:
+    global _OS_RELEASE_FIXTURE_PATH
+    if _OS_RELEASE_FIXTURE_PATH is None:
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix="-os-release", delete=False, encoding="utf-8"
+        )
+        handle.write(FIXTURE_OS_RELEASE)
+        handle.close()
+        _OS_RELEASE_FIXTURE_PATH = handle.name
+    return _OS_RELEASE_FIXTURE_PATH
+
+
+def run_cli(args, cwd, env=None):
     return subprocess.run(
         [sys.executable, "-m", "refindmgr.cli", *args],
         cwd=cwd,
         capture_output=True,
         text=True,
+        env=cli_env() if env is None else env,
     )
 
 
@@ -300,8 +331,13 @@ class TestSetupVersionPinning(unittest.TestCase):
 
     APT_MANAGER = system_mod.PackageManagerInfo("apt", ["apt-get", "install", "-y", "refind"])
 
-    def _run_setup(self, refind_dir, yes=False):
-        args = argparse.Namespace(refind_dir=str(refind_dir), yes=yes)
+    def _run_setup(self, refind_dir, yes=False, allow_direct_download=True,
+                   deb_sha256="ab" * 32):
+        args = argparse.Namespace(
+            refind_dir=str(refind_dir), yes=yes,
+            allow_direct_download=allow_direct_download,
+            deb_sha256=deb_sha256,
+        )
         buffer = io.StringIO()
         with redirect_stdout(buffer):
             cli_mod.cmd_setup(args)
@@ -410,8 +446,13 @@ class TestAptDebFallback(unittest.TestCase):
 
     APT_MANAGER = system_mod.PackageManagerInfo("apt", ["apt-get", "install", "-y", "refind"])
 
-    def _run_setup(self, refind_dir, yes=False):
-        args = argparse.Namespace(refind_dir=str(refind_dir), yes=yes)
+    def _run_setup(self, refind_dir, yes=False, allow_direct_download=True,
+                   deb_sha256="ab" * 32):
+        args = argparse.Namespace(
+            refind_dir=str(refind_dir), yes=yes,
+            allow_direct_download=allow_direct_download,
+            deb_sha256=deb_sha256,
+        )
         buffer = io.StringIO()
         with redirect_stdout(buffer):
             cli_mod.cmd_setup(args)
@@ -663,6 +704,7 @@ class TestAutoCleanMenu(unittest.TestCase):
                 input="8\ny\n\n0\n",
                 capture_output=True,
                 text=True,
+                env=cli_env(),
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("OS ditemukan", result.stdout)

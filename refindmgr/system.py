@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Callable, List, NamedTuple, Optional, Tuple
 
 
@@ -95,7 +96,14 @@ def version_tuple(version: str) -> Tuple[int, ...]:
     """Ubah string versi ternormalisasi ('0.14.1') jadi tuple untuk dibandingkan
     ('>' , '<', '==') secara numerik, bukan leksikografis (supaya '0.14.2' > '0.14.10'
     dibandingkan dengan benar, bukan seperti membandingkan string biasa)."""
-    return tuple(int(part) for part in _normalize_version(version).split("."))
+    normalized = _normalize_version(version)
+    parts = []
+    for part in normalized.split("."):
+        if not part.isdigit():
+            # Package managers emit 'unknown', '(none)' or an empty string.
+            raise BootstrapError(f"Versi paket tidak dapat dibaca sebagai angka: '{version}'")
+        parts.append(int(part))
+    return tuple(parts)
 
 
 def get_installed_refind_version(
@@ -110,7 +118,7 @@ def get_installed_refind_version(
     command = _VERSION_QUERY_COMMANDS.get(manager.name)
     if command is None:
         return None
-    result = run_fn(command, capture_output=True, text=True)
+    result = _run_managed(run_fn, command)
     if result.returncode != 0:
         return None
     output = (result.stdout or "").strip()
@@ -138,7 +146,7 @@ def find_available_version(
     command = _AVAILABLE_VERSIONS_COMMANDS.get(manager.name)
     if command is None:
         return None
-    result = run_fn(command, capture_output=True, text=True)
+    result = _run_managed(run_fn, command)
     if result.returncode != 0:
         return None
     for line in (result.stdout or "").splitlines():
@@ -187,7 +195,7 @@ def pin_refind_version(
             "  https://sourceforge.net/projects/refind/files/"
         )
     command = _PIN_INSTALL_COMMANDS[manager.name](exact_version)
-    result = run_fn(command, capture_output=True, text=True)
+    result = _run_managed(run_fn, command)
     if result.returncode != 0:
         raise BootstrapError(
             f"Gagal memasang rEFInd versi {exact_version} lewat {manager.name}: "
@@ -196,13 +204,41 @@ def pin_refind_version(
     return exact_version
 
 
+DOWNLOAD_TIMEOUT_SECONDS = 300
+PACKAGE_TIMEOUT_SECONDS = 900
+
+
+def _run_managed(run_fn, command):
+    """Run a package-manager command with a timeout and no silent OSError.
+
+    Every call here used to block forever: apt waiting on a dpkg lock, or
+    refind-install prompting about Secure Boot into a swallowed stdin.
+    """
+    try:
+        return run_fn(command, capture_output=True, text=True, timeout=PACKAGE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise BootstrapError(
+            f"Perintah '{' '.join(command[:2])}' melewati timeout {PACKAGE_TIMEOUT_SECONDS} detik "
+            "(kemungkinan menunggu lock dpkg/apt atau prompt interaktif)."
+        ) from exc
+    except OSError as exc:
+        raise BootstrapError(f"Gagal menjalankan '{command[0]}': {exc}") from exc
+
+
 REFIND_DEB_URL_TEMPLATE = 'https://sourceforge.net/projects/refind/files/{version}/refind_{version}-1_amd64.deb/download'
+
+
+DEB_MAGIC = b"!<arch>\ndebian-binary"
+
+
+from .hashing import sha256_file
 
 
 def download_refind_deb(
     version: str,
     dest_path: str,
     run_fn: Callable[..., "subprocess.CompletedProcess"] = subprocess.run,
+    expected_sha256: Optional[str] = None,
 ) -> str:
     """Unduh paket .deb resmi rEFInd untuk `version` langsung dari SourceForge,
     melewati repo apt distro.
@@ -215,12 +251,52 @@ def download_refind_deb(
     paket .deb resmi yang dirilis proyek rEFInd sendiri di SourceForge (bukan
     binari pihak ketiga).
     """
+    # SourceForge's /download endpoint redirects to a community mirror, so the
+    # bytes that arrive here are NOT authenticated by the rEFInd project. This
+    # package is installed as root and its maintainer scripts run as root, so a
+    # checksum is mandatory rather than optional.
+    if not expected_sha256:
+        raise BootstrapError(
+            "Unduhan .deb langsung membutuhkan checksum. SourceForge mengarahkan ke mirror "
+            "komunitas, jadi isinya tidak terverifikasi, sedangkan paket ini dipasang sebagai "
+            "root.\nUlangi dengan --deb-sha256 <hex> memakai checksum resmi rEFInd, atau pasang "
+            "rEFInd lewat package manager distro."
+        )
+    expected = expected_sha256.strip().lower()
+    if len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
+        raise BootstrapError(f"Checksum SHA-256 tidak valid: {expected_sha256}")
+
     url = REFIND_DEB_URL_TEMPLATE.format(version=version)
-    result = run_fn(["curl", "-fsSL", "-o", dest_path, url], capture_output=True, text=True)
+    try:
+        result = run_fn(
+            ["curl", "-fsSL", "--proto", "=https", "--tlsv1.2", "-o", dest_path, url],
+            capture_output=True, text=True, timeout=DOWNLOAD_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BootstrapError(f"Unduhan paket rEFInd melewati timeout {DOWNLOAD_TIMEOUT_SECONDS} detik.") from exc
+    except OSError as exc:
+        raise BootstrapError(f"Gagal menjalankan curl: {exc}") from exc
     if result.returncode != 0 or not os.path.exists(dest_path) or os.path.getsize(dest_path) == 0:
         raise BootstrapError(
             f"Gagal mengunduh paket rEFInd {version} dari SourceForge ({url}): "
             f"{(result.stderr or '').strip() or (result.stdout or '').strip() or 'file kosong/tidak ditemukan'}"
+        )
+    try:
+        with open(dest_path, "rb") as handle:
+            header = handle.read(len(DEB_MAGIC))
+    except OSError as exc:
+        raise BootstrapError(f"Paket hasil unduhan tidak dapat dibaca: {exc}") from exc
+    if header != DEB_MAGIC:
+        os.unlink(dest_path)
+        raise BootstrapError(
+            "Berkas hasil unduhan bukan paket .deb (mirror kemungkinan mengembalikan halaman HTML)."
+        )
+    actual = sha256_file(dest_path)
+    if actual != expected:
+        os.unlink(dest_path)
+        raise BootstrapError(
+            "Checksum paket .deb tidak cocok; paket dibuang dan TIDAK dipasang.\n"
+            f"  diharapkan: {expected}\n  didapat   : {actual}"
         )
     return dest_path
 
@@ -235,11 +311,11 @@ def install_deb_file(
     'apt-get install -f' sekali lalu ulangi dpkg -- pola standar Debian/Ubuntu
     untuk memasang .deb lokal.
     """
-    result = run_fn(["dpkg", "-i", path], capture_output=True, text=True)
+    result = _run_managed(run_fn, ["dpkg", "-i", path])
     if result.returncode == 0:
         return result.stdout or ""
-    run_fn(["apt-get", "install", "-f", "-y"], capture_output=True, text=True)
-    retry = run_fn(["dpkg", "-i", path], capture_output=True, text=True)
+    _run_managed(run_fn, ["apt-get", "install", "-f", "-y"])
+    retry = _run_managed(run_fn, ["dpkg", "-i", path])
     if retry.returncode != 0:
         raise BootstrapError(
             "Gagal memasang paket .deb rEFInd: "
@@ -252,7 +328,7 @@ def is_root() -> bool:
     return os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0
 
 
-def esp_root_from_refind_dir(refind_dir) -> Optional["__import__('pathlib').Path"]:
+def esp_root_from_refind_dir(refind_dir) -> Optional[Path]:
     """Tebak root ESP dari lokasi folder rEFInd, misal '.../EFI/refind' -> '...'.
 
     Dipakai oleh audit loader ('doctor') untuk tahu dari mana harus mulai
@@ -261,7 +337,6 @@ def esp_root_from_refind_dir(refind_dir) -> Optional["__import__('pathlib').Path
     supaya pemanggilnya bisa melewati audit ini dengan aman daripada menebak
     lokasi yang salah.
     """
-    from pathlib import Path
 
     refind_dir = Path(refind_dir)
     efi_dir = refind_dir.parent
@@ -281,7 +356,6 @@ def list_esp_loader_files(refind_dir) -> List[str]:
     Mengembalikan list kosong (bukan error) kalau root ESP tidak bisa ditebak
     atau tidak bisa dibaca -- audit ini bersifat best-effort/informational.
     """
-    from pathlib import Path
 
     esp_root = esp_root_from_refind_dir(refind_dir)
     if esp_root is None or not esp_root.is_dir():
@@ -323,7 +397,6 @@ def find_boot_kernel_files(boot_dir: str = "/boot") -> List[str]:
     Mengembalikan list kosong (bukan error) kalau /boot tidak ada atau tidak
     bisa dibaca -- fungsi ini bersifat best-effort/informational.
     """
-    from pathlib import Path
 
     root = Path(boot_dir)
     if not root.is_dir():
@@ -365,7 +438,7 @@ def install_package(
     run_fn: Callable[..., "subprocess.CompletedProcess"] = subprocess.run,
 ) -> None:
     """Jalankan command install package rEFInd lewat package manager sistem."""
-    result = run_fn(manager.install_command, capture_output=True, text=True)
+    result = _run_managed(run_fn, list(manager.install_command))
     if result.returncode != 0:
         raise BootstrapError(
             f"Gagal memasang paket rEFInd lewat {manager.name}: "
@@ -382,7 +455,9 @@ def run_refind_install(
     ia melakukannya dengan mendelegasikan seluruhnya ke skrip resmi upstream,
     bukan logika buatan sendiri.
     """
-    result = run_fn(["refind-install"], capture_output=True, text=True)
+    # refind-install asks about shim/Secure Boot. capture_output swallows the
+    # prompt, so without a timeout the tool hangs forever with no output.
+    result = _run_managed(run_fn, ["refind-install"])
     if result.returncode != 0:
         raise BootstrapError(
             f"refind-install gagal: {(result.stderr or '').strip() or (result.stdout or '').strip()}"

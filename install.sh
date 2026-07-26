@@ -52,55 +52,70 @@ chmod 0755 "$STAGING/refindmgr"
 # installation remains available until staging is complete.
 rm -rf "${INSTALL_DIR}.old"
 if [ -e "$INSTALL_DIR" ]; then mv "$INSTALL_DIR" "${INSTALL_DIR}.old"; fi
+# mktemp -d creates the staging directory 0700 and mv preserves that mode, so
+# without this chmod /opt/refindmgr stays root-only and every non-root command
+# (refindmgr catalog, --version, read-only doctor) fails with Permission denied.
+chmod 0755 "$STAGING"
 mv "$STAGING" "$INSTALL_DIR"
 trap - EXIT
 ln -sfn "$INSTALL_DIR/refindmgr" /usr/local/bin/refindmgr
 rm -rf "${INSTALL_DIR}.old"
 
-# Install the img2sixel renderer automatically.  The renderer is required to
-# encode previews, while the terminal itself must also support the Sixel
-# protocol.  Failure remains non-fatal so refindmgr can still manage themes on
-# Linux consoles and other terminals that cannot display graphics.
-install_sixel_renderer() {
-  if command -v img2sixel >/dev/null 2>&1; then
-    echo "Sixel renderer siap: $(command -v img2sixel)"
+# Two renderers, different jobs:
+#   img2sixel  -- Sixel at an EXACT pixel size. chafa's --size is in cells and,
+#                 when its stdout is a pipe, it cannot ask the terminal how big
+#                 a cell is, so it assumes a square 8x8 one and the thumbnail
+#                 comes out squashed and roughly a third of the intended size.
+#   chafa      -- the character-art fallback for terminals with no image
+#                 protocol at all (GNOME Terminal, Alacritty, Linux console).
+# The two best backends (Kitty f=100 and iTerm2) need neither: they base64 the
+# bundled PNG straight to the terminal. So this whole step stays non-fatal.
+install_preview_renderer() {
+  local want_chafa=1 want_sixel=1
+  command -v chafa >/dev/null 2>&1 && want_chafa=0
+  command -v img2sixel >/dev/null 2>&1 && want_sixel=0
+  if [ "$want_chafa" -eq 0 ] && [ "$want_sixel" -eq 0 ]; then
+    echo "Renderer preview siap: $(command -v chafa), $(command -v img2sixel)"
     return 0
   fi
 
-  echo "Memasang renderer Sixel (img2sixel) otomatis..."
+  echo "Memasang renderer preview (chafa + libsixel) otomatis..."
 
   if command -v apt-get >/dev/null 2>&1; then
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y libsixel-bin; then
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y chafa libsixel-bin; then
       echo "Index paket belum siap; menjalankan apt-get update..."
-      apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libsixel-bin
+      apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y chafa libsixel-bin
     fi
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y libsixel-utils
+    dnf install -y chafa libsixel-utils
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y libsixel-utils
+    yum install -y chafa libsixel-utils
   elif command -v pacman >/dev/null 2>&1; then
-    pacman -S --noconfirm --needed libsixel
+    pacman -S --noconfirm --needed chafa libsixel
   elif command -v zypper >/dev/null 2>&1; then
-    zypper --non-interactive install libsixel
+    zypper --non-interactive install chafa libsixel
   elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache libsixel-tools
+    apk add --no-cache chafa libsixel-tools
   else
-    echo "PERINGATAN: package manager tidak dikenali; img2sixel tidak dapat dipasang otomatis."
+    echo "PERINGATAN: package manager tidak dikenali; chafa tidak dapat dipasang otomatis."
     return 1
   fi
 
-  if command -v img2sixel >/dev/null 2>&1; then
-    echo "Sixel renderer berhasil dipasang: $(command -v img2sixel)"
+  if command -v chafa >/dev/null 2>&1 || command -v img2sixel >/dev/null 2>&1; then
+    echo "Renderer preview berhasil dipasang."
+    command -v chafa >/dev/null 2>&1 && echo "  chafa    : $(command -v chafa)"
+    command -v img2sixel >/dev/null 2>&1 && echo "  img2sixel: $(command -v img2sixel)"
     return 0
   fi
 
-  echo "PERINGATAN: package manager selesai tetapi command img2sixel belum ditemukan."
+  echo "PERINGATAN: package manager selesai tetapi chafa/img2sixel belum ditemukan."
   return 1
 }
 
-if ! install_sixel_renderer; then
+if ! install_preview_renderer; then
   echo "INFO: instalasi CLI tetap dilanjutkan tanpa renderer preview."
-  echo "INFO: pasang img2sixel secara manual lalu buka katalog kembali."
+  echo "INFO: terminal dengan protokol Kitty/iTerm2 tetap menampilkan gambar tanpa renderer."
+  echo "INFO: untuk terminal lain, pasang chafa lalu buka katalog kembali."
 fi
 
 echo "Selesai: $(refindmgr --version)"
@@ -132,8 +147,20 @@ fi
 # guessing and touching disks blindly.
 if [ -d /sys/firmware/efi ]; then
   SETUP_LOG="$(mktemp /tmp/refindmgr-setup.XXXXXX.log)"
+  echo "Menjalankan preflight boot read-only..."
+  if ! refindmgr preflight --setup >"$SETUP_LOG" 2>&1; then
+    cat "$SETUP_LOG"
+    echo "INFO: setup bootloader otomatis dihentikan karena layout boot ambigu."
+    echo "INFO: CLI tetap terpasang; ESP dan NVRAM tidak diubah."
+    echo "INFO: jalankan 'sudo refindmgr doctor --forensic --scan-unmounted --export'."
+    exit 0
+  fi
   echo "Menyiapkan rEFInd otomatis (log: $SETUP_LOG)..."
-  if refindmgr setup --yes --pin-version --refresh-esp --allow-direct-download >"$SETUP_LOG" 2>&1; then
+  # --allow-direct-download is deliberately NOT passed here. It downloads a
+  # .deb through a SourceForge mirror redirect and installs it as root; that
+  # now requires an explicit --deb-sha256 and must be a human decision, not
+  # something an unattended installer does on every UEFI machine.
+  if refindmgr setup --yes --pin-version --refresh-esp >"$SETUP_LOG" 2>&1; then
     cat "$SETUP_LOG"
     rm -f "$SETUP_LOG"
     echo "Setup rEFInd selesai."

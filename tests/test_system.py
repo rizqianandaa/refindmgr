@@ -45,14 +45,14 @@ class TestRefindInstallAvailable(unittest.TestCase):
 
 class TestInstallPackage(unittest.TestCase):
     def test_success_does_not_raise(self):
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
         manager = system_mod.PackageManagerInfo("apt", ["apt-get", "install", "-y", "refind"])
         system_mod.install_package(manager, run_fn=fake_run)
 
     def test_failure_raises_bootstrap_error(self):
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             return SimpleNamespace(returncode=1, stdout="", stderr="no internet")
 
         manager = system_mod.PackageManagerInfo("apt", ["apt-get", "install", "-y", "refind"])
@@ -62,7 +62,7 @@ class TestInstallPackage(unittest.TestCase):
 
 class TestRunRefindInstall(unittest.TestCase):
     def test_success_returns_stdout(self):
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             self.assertEqual(cmd, ["refind-install"])
             return SimpleNamespace(returncode=0, stdout="installed!", stderr="")
 
@@ -70,7 +70,7 @@ class TestRunRefindInstall(unittest.TestCase):
         self.assertEqual(output, "installed!")
 
     def test_failure_raises_bootstrap_error(self):
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             return SimpleNamespace(returncode=1, stdout="", stderr="boom")
 
         with self.assertRaises(system_mod.BootstrapError):
@@ -92,7 +92,7 @@ class TestVersionTuple(unittest.TestCase):
 
 class TestGetInstalledRefindVersion(unittest.TestCase):
     def test_apt_style_strips_distro_revision(self):
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             self.assertEqual(cmd, ["dpkg-query", "-W", "-f=${Version}\n", "refind"])
             return SimpleNamespace(returncode=0, stdout="0.14.2-2.1\n", stderr="")
 
@@ -100,14 +100,14 @@ class TestGetInstalledRefindVersion(unittest.TestCase):
         self.assertEqual(system_mod.get_installed_refind_version(manager, run_fn=fake_run), "0.14.2")
 
     def test_pacman_style_parses_second_token(self):
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             return SimpleNamespace(returncode=0, stdout="refind 0.14.1-1\n", stderr="")
 
         manager = system_mod.PackageManagerInfo("pacman", ["pacman", "-S", "--noconfirm", "refind"])
         self.assertEqual(system_mod.get_installed_refind_version(manager, run_fn=fake_run), "0.14.1")
 
     def test_returns_none_when_not_installed(self):
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             return SimpleNamespace(returncode=1, stdout="", stderr="not installed")
 
         manager = system_mod.PackageManagerInfo("apt", ["apt-get", "install", "-y", "refind"])
@@ -121,7 +121,7 @@ class TestFindAvailableVersion(unittest.TestCase):
             " refind | 0.14.2-2.1 | http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages\n"
         )
 
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             self.assertEqual(cmd, ["apt-cache", "madison", "refind"])
             return SimpleNamespace(returncode=0, stdout=madison_output, stderr="")
 
@@ -131,14 +131,14 @@ class TestFindAvailableVersion(unittest.TestCase):
     def test_returns_none_when_target_not_listed(self):
         madison_output = " refind | 0.14.2-2.1 | http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages\n"
 
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             return SimpleNamespace(returncode=0, stdout=madison_output, stderr="")
 
         manager = system_mod.PackageManagerInfo("apt", ["apt-get", "install", "-y", "refind"])
         self.assertIsNone(system_mod.find_available_version(manager, "0.14.1", run_fn=fake_run))
 
     def test_returns_none_when_manager_unsupported(self):
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             raise AssertionError("should not be called for unsupported managers")
 
         manager = system_mod.PackageManagerInfo("pacman", ["pacman", "-S", "--noconfirm", "refind"])
@@ -150,7 +150,7 @@ class TestPinRefindVersion(unittest.TestCase):
         madison_output = " refind | 0.14.1-1 | http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages\n"
         calls = []
 
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             calls.append(cmd)
             if cmd[:2] == ["apt-cache", "madison"]:
                 return SimpleNamespace(returncode=0, stdout=madison_output, stderr="")
@@ -164,7 +164,7 @@ class TestPinRefindVersion(unittest.TestCase):
     def test_raises_when_target_not_available_in_repo(self):
         madison_output = " refind | 0.14.2-2.1 | http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages\n"
 
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             return SimpleNamespace(returncode=0, stdout=madison_output, stderr="")
 
         manager = system_mod.PackageManagerInfo("apt", ["apt-get", "install", "-y", "refind"])
@@ -179,7 +179,7 @@ class TestPinRefindVersion(unittest.TestCase):
     def test_raises_when_install_command_fails(self):
         madison_output = " refind | 0.14.1-1 | http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages\n"
 
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             if cmd[:2] == ["apt-cache", "madison"]:
                 return SimpleNamespace(returncode=0, stdout=madison_output, stderr="")
             return SimpleNamespace(returncode=1, stdout="", stderr="dpkg lock held")
@@ -194,23 +194,72 @@ class TestDownloadRefindDeb(unittest.TestCase):
     # jadi pin_refind_version() gagal terus -- refindmgr butuh jalur cadangan
     # yang mengunduh .deb resmi rEFInd langsung dari SourceForge.
 
-    def test_success_returns_dest_path(self):
-        def fake_run(cmd, capture_output, text):
+    # The payload must look like a real .deb: SourceForge's /download endpoint
+    # redirects to community mirrors, so a broken mirror commonly serves an
+    # HTML error page instead.
+    PAYLOAD = b"!<arch>\ndebian-binary   fake deb bytes"
+
+    def _writer(self, payload=None):
+        body = self.PAYLOAD if payload is None else payload
+
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             self.assertEqual(cmd[0], "curl")
             self.assertIn("0.14.1", cmd[-1])
-            with open(cmd[cmd.index("-o") + 1], "w") as f:
-                f.write("fake deb bytes")
+            with open(cmd[cmd.index("-o") + 1], "wb") as handle:
+                handle.write(body)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        import tempfile, os
+        return fake_run
+
+    def test_success_returns_dest_path(self):
+        import hashlib, os, tempfile
+        digest = hashlib.sha256(self.PAYLOAD).hexdigest()
         with tempfile.TemporaryDirectory() as tmp:
             dest = os.path.join(tmp, "refind.deb")
-            result = system_mod.download_refind_deb("0.14.1", dest, run_fn=fake_run)
+            result = system_mod.download_refind_deb(
+                "0.14.1", dest, run_fn=self._writer(), expected_sha256=digest
+            )
             self.assertEqual(result, dest)
             self.assertTrue(os.path.exists(dest))
 
+    def test_missing_checksum_is_refused(self):
+        # This .deb is installed as root and its maintainer scripts run as
+        # root, so unverified bytes from a redirected mirror must never be
+        # handed to dpkg.
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "refind.deb")
+            with self.assertRaises(system_mod.BootstrapError) as ctx:
+                system_mod.download_refind_deb("0.14.1", dest, run_fn=self._writer())
+            self.assertIn("checksum", str(ctx.exception).lower())
+            self.assertFalse(os.path.exists(dest))
+
+    def test_checksum_mismatch_discards_the_package(self):
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "refind.deb")
+            with self.assertRaises(system_mod.BootstrapError) as ctx:
+                system_mod.download_refind_deb(
+                    "0.14.1", dest, run_fn=self._writer(), expected_sha256="ab" * 32
+                )
+            self.assertIn("tidak cocok", str(ctx.exception))
+            self.assertFalse(os.path.exists(dest))
+
+    def test_html_error_page_from_a_mirror_is_rejected(self):
+        import hashlib, os, tempfile
+        body = b"<!DOCTYPE html><html>mirror is down</html>"
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "refind.deb")
+            with self.assertRaises(system_mod.BootstrapError) as ctx:
+                system_mod.download_refind_deb(
+                    "0.14.1", dest, run_fn=self._writer(body),
+                    expected_sha256=hashlib.sha256(body).hexdigest(),
+                )
+            self.assertIn("bukan paket .deb", str(ctx.exception))
+            self.assertFalse(os.path.exists(dest))
+
     def test_raises_when_curl_fails(self):
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             return SimpleNamespace(returncode=1, stdout="", stderr="curl: (6) could not resolve host")
 
         import tempfile, os
@@ -220,7 +269,7 @@ class TestDownloadRefindDeb(unittest.TestCase):
                 system_mod.download_refind_deb("0.14.1", dest, run_fn=fake_run)
 
     def test_raises_when_downloaded_file_is_empty(self):
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             # curl "succeeds" (returncode 0) but never actually writes the file
             # (e.g. SourceForge redirect edge case) -- must still be treated as failure.
             return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -236,7 +285,7 @@ class TestInstallDebFile(unittest.TestCase):
     def test_success_on_first_dpkg_call(self):
         calls = []
 
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             calls.append(cmd)
             return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
@@ -247,7 +296,7 @@ class TestInstallDebFile(unittest.TestCase):
     def test_retries_after_fixing_dependencies(self):
         calls = []
 
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             calls.append(cmd)
             if cmd[:2] == ["dpkg", "-i"] and calls.count(cmd) == 1:
                 return SimpleNamespace(returncode=1, stdout="", stderr="dependency problems")
@@ -258,7 +307,7 @@ class TestInstallDebFile(unittest.TestCase):
         self.assertIn(["apt-get", "install", "-f", "-y"], calls)
 
     def test_raises_when_retry_also_fails(self):
-        def fake_run(cmd, capture_output, text):
+        def fake_run(cmd, capture_output=True, text=True, **kwargs):
             return SimpleNamespace(returncode=1, stdout="", stderr="still broken")
 
         with self.assertRaises(system_mod.BootstrapError):

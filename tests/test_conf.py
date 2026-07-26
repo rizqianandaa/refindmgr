@@ -206,10 +206,28 @@ class TestSetGlobalOption(unittest.TestCase):
         self.assertNotIn("showtools shell, memtest, gdisk", new_lines)
         self.assertEqual(len(new_lines), 2)
 
-    def test_uncomments_and_replaces_commented_line(self):
+    def test_commented_default_is_preserved_next_to_the_new_active_line(self):
+        # refind.conf-sample ships its documented defaults as commented lines.
+        # Overwriting them left 'declutter --undo' (which only re-comments the
+        # ACTIVE line) with no way to show the original value again.
         lines = ["# showtools shell, memtest"]
         new_lines = conf_mod.set_global_option(lines, "showtools", "shutdown,reboot")
-        self.assertEqual(new_lines, ["showtools shutdown,reboot"])
+        self.assertEqual(new_lines, ["# showtools shell, memtest", "showtools shutdown,reboot"])
+        self.assertEqual(conf_mod.get_global_option(new_lines, "showtools"), "shutdown,reboot")
+
+    def test_setting_twice_does_not_accumulate_lines(self):
+        lines = ["# showtools shell, memtest"]
+        once = conf_mod.set_global_option(lines, "showtools", "shutdown,reboot")
+        twice = conf_mod.set_global_option(once, "showtools", "firmware")
+        self.assertEqual(len(twice), 2)
+        self.assertEqual(conf_mod.get_global_option(twice, "showtools"), "firmware")
+
+    def test_undo_leaves_the_documented_default_readable(self):
+        lines = ["# showtools shell, memtest"]
+        applied = conf_mod.set_global_option(lines, "showtools", "shutdown,reboot")
+        undone = conf_mod.unset_global_option(applied, "showtools")
+        self.assertIsNone(conf_mod.get_global_option(undone, "showtools"))
+        self.assertIn("# showtools shell, memtest", undone)
 
     def test_appends_when_token_absent(self):
         lines = ["timeout 5"]

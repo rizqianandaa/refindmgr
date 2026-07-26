@@ -1,0 +1,13 @@
+# Without this the sdist contains only LICENSE, PKG-INFO, README.md,
+# pyproject.toml, refindmgr/ and tests/ -- anyone installing from an sdist got
+# no installer and no main.py, even though main.py documents itself as the way
+# to run refindmgr without installing the package.
+include install.sh
+include uninstall.sh
+include main.py
+include MANIFEST.in
+recursive-include docs *.md
+recursive-include assets *.svg
+recursive-include refindmgr/assets *.png *.jpg
+recursive-include tests *.py
+global-exclude __pycache__ *.py[cod]
